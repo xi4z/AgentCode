@@ -1,16 +1,108 @@
 spring:
   application:
-    name: agentcode-java
+    name: ${SPRING_APPLICATION_NAME:agentcode-java}
+
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+
   ai:
     dashscope:
       api-key: ${DASHSCOPE_API_KEY:}
+      base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/api/v1}
       chat:
         options:
-          model: qwen-max
-          temperature: 0.7
+          model: ${DASHSCOPE_CHAT_MODEL:qwen-max}
+          temperature: ${DASHSCOPE_TEMPERATURE:0.7}
+          top-p: ${DASHSCOPE_TOP_P:0.8}
+          max-tokens: ${DASHSCOPE_MAX_TOKENS:8192}
+          stop: ${DASHSCOPE_STOP:}
+    chat:
+      client:
+        observation-enabled: ${AI_OBSERVATION_ENABLED:true}
+    mcp:
+      client:
+        enabled: ${MCP_CLIENT_ENABLED:false}
+
+agentcode:
+  agent:
+    max-steps: ${AGENT_MAX_STEPS:20}
+    system-prompt: ${AGENT_SYSTEM_PROMPT:You are a helpful AI assistant. Use the available tools to complete the user's goal. When the goal is fully achieved, respond with a final answer and do not call any more tools.}
+    global-context-file: ${AGENT_GLOBAL_CONTEXT_FILE:~/.kama/context.md}
+    project-context-file: ${AGENT_PROJECT_CONTEXT_FILE:.kama/context.md}
+
+  llm:
+    default-model: ${AGENT_LLM_DEFAULT_MODEL:qwen-max}
+
+  tool:
+    timeout-seconds: ${TOOL_TIMEOUT_SECONDS:120}
+    max-output-bytes: ${TOOL_MAX_OUTPUT_BYTES:65536}
+    whitelist: ${TOOL_WHITELIST:}
+    # 示例：TOOL_WHITELIST=read_file,list_dir
+
+  permission:
+    # ask / auto / never
+    mode: ${PERMISSION_MODE:never}
+    default-action: ${PERMISSION_DEFAULT_ACTION:deny}
+    policy-file: ${PERMISSION_POLICY_FILE:~/.kama/policy.toml}
+    timeout-seconds: ${PERMISSION_TIMEOUT_SECONDS:60}
+
+  session:
+    root-dir: ${SESSION_ROOT_DIR:~/.kama/sessions}
+    one-shot-mode: ${SESSION_ONE_SHOT_MODE:true}
+    chat-mode: ${SESSION_CHAT_MODE:false}
+
+  compaction:
+    auto-threshold: ${COMPACTION_AUTO_THRESHOLD:0.8}
+    tool-result-limit: ${COMPACTION_TOOL_RESULT_LIMIT:8000}
+    tool-result-keep: ${COMPACTION_TOOL_RESULT_KEEP:4000}
+
+  event:
+    enabled: ${EVENT_ENABLED:true}
+    file: ${EVENT_FILE:~/.kama/events.jsonl}
+
+  transport:
+    host: ${KAMA_HOST:127.0.0.1}
+    port: ${KAMA_PORT:7437}
+    protocol: ${KAMA_PROTOCOL:json-rpc-ndjson}
+
+  trace:
+    enabled: ${TRACE_ENABLED:true}
+    file: ${TRACE_FILE:~/.kama/traces/daemon.jsonl}
+    include-llm-payload: ${TRACE_INCLUDE_LLM_PAYLOAD:true}
+
+  mcp:
+    # MCP server 列表建议通过代码配置或配置类注入。
+    # 如需从环境变量读取，可使用 SPRING_AI_MCP_CLIENT_* 或自行解析 JSON 环境变量。
+    servers: ${MCP_SERVERS:[]}
+
+# 若需要配置 Spring AI 原生 MCP client，可参考：
+# spring:
+#   ai:
+#     mcp:
+#       client:
+#         enabled: ${MCP_CLIENT_ENABLED:false}
+#         name: ${MCP_CLIENT_NAME:agentcode}
+#         version: ${MCP_CLIENT_VERSION:0.0.1}
+#         type: ${MCP_CLIENT_TYPE:SYNC}
+#         stdio:
+#           servers:
+#             - name: ${MCP_STDIO_SERVER_NAME:default}
+#               command: ${MCP_STDIO_SERVER_COMMAND:}
+#               args: ${MCP_STDIO_SERVER_ARGS:}
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: ${ACTUATOR_EXPOSE:health,info,metrics}
+  endpoint:
+    health:
+      show-details: ${ACTUATOR_HEALTH_SHOW_DETAILS:always}
+
+logging:
+  level:
+    root: ${LOG_LEVEL:INFO}
+    com.agentcode: ${AGENT_LOG_LEVEL:DEBUG}
+    org.springframework.ai: ${SPRING_AI_LOG_LEVEL:INFO}
+  file:
+    name: ${LOG_FILE:logs/agentcode.log}

@@ -1,11 +1,61 @@
+# Maven
 target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# Java
 *.class
 *.jar
 *.war
+*.ear
+*.nar
+*.zip
+*.tar.gz
+*.rar
+
+# IDE
 .idea/
 *.iml
+*.ipr
+*.iws
 .vscode/
+.settings/
+.project
+.classpath
+.factorypath
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Logs
+*.log
 logs/
+
+# Environment / secrets
 .env
+.env.*
+!.env.example
 application-local.yml
+application-dev.yml
+application-prod.yml
+
+# Agent runtime data
+.agentcode/
+runs/
+sessions/
+traces/
+events.jsonl
+
+# Test / build output
+out/
+build/
+dist/
+*.hprof
