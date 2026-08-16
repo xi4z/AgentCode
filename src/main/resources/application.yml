@@ -6,6 +6,19 @@ spring:
     active: ${SPRING_PROFILES_ACTIVE:dev}
 
   ai:
+    model:
+      # openai / dashscope / anthropic / ollama
+      chat: ${AI_MODEL_PROVIDER:openai}
+
+    openai:
+      api-key: ${OPENAI_API_KEY:}
+      base-url: ${OPENAI_BASE_URL:https://api.openai.com}
+      chat:
+        options:
+          model: ${OPENAI_CHAT_MODEL:gpt-4o-mini}
+          temperature: ${OPENAI_TEMPERATURE:0.7}
+          max-tokens: ${OPENAI_MAX_TOKENS:8192}
+
     dashscope:
       api-key: ${DASHSCOPE_API_KEY:}
       base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/api/v1}
