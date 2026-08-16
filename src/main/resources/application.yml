@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: agentcode-java
+  ai:
+    dashscope:
+      api-key: ${DASHSCOPE_API_KEY:}
+      chat:
+        options:
+          model: qwen-max
+          temperature: 0.7
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
