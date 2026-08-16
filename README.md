@@ -21,8 +21,9 @@ Java/
 ## 技术栈
 
 - Java 17
-- Spring Boot 3.4
-- Spring AI Alibaba
+- Spring Boot 3.5.x
+- Spring AI Alibaba 1.1.2.0
+- Spring AI 1.1.2
 - Maven
 
 ## 常用命令
