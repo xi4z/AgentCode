@@ -1,11 +1,10 @@
 package com.agentcode.agent;
 
 import com.agentcode.context.AgentContext;
-import com.agentcode.tools.SearchTools;
 import com.alibaba.cloud.ai.graph.NodeOutput;
-import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
+import com.alibaba.cloud.ai.graph.agent.hook.shelltool.ShellToolAgentHook;
 import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
@@ -18,7 +17,6 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
@@ -34,11 +32,18 @@ public class AgentLoop {
 
     public Flux<AgentStream> run(AgentContext context) throws GraphRunnerException {
         // TODO 可以根据设定注入可用工具
+        String workspace = resolveWorkspace(context);
+        ShellTool2 shellTool2 = ShellTool2.builder(workspace).build();
+
         ReactAgent reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
                 .model(chatModel)
                 .saver(memorySaver)
-                .tools(defaultTools(context))
+                .tools(defaultTools(workspace))
+                .hooks(ShellToolAgentHook.builder()
+                        .shellTool2(shellTool2)
+                        .shellToolName("shell")
+                        .build())
                 .systemPrompt(context.systemPrompt())
                 .build();
 
@@ -114,15 +119,21 @@ public class AgentLoop {
         }
     }
 
-    private List<ToolCallback> defaultTools(AgentContext agentContext) {
-        String workspace = agentContext.getWorkspace();
-        ToolCallback[] shell = ToolCallbacks.from(ShellTool2.builder(workspace).build());
+    private List<ToolCallback> defaultTools(String workspace) {
         ToolCallback grep = GrepSearchTool.builder(workspace).build();
-        ToolCallback build = GlobSearchTool.builder(workspace).build();
+        ToolCallback glob = GlobSearchTool.builder(workspace).build();
 
-        List<ToolCallback> tools = new ArrayList<>(List.of(shell));
+        List<ToolCallback> tools = new ArrayList<>();
         tools.add(grep);
-        tools.add(build);
+        tools.add(glob);
         return tools;
+    }
+
+    private String resolveWorkspace(AgentContext agentContext) {
+        String workspace = agentContext.getWorkspace();
+        if (workspace == null || workspace.isBlank()) {
+            return System.getProperty("user.dir");
+        }
+        return workspace;
     }
 }

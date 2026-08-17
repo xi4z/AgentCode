@@ -28,6 +28,10 @@ public class ReActAgentServiceImpl implements ReactAgentService {
             agentContext = agentContextStore.find(runId).get();
         }
 
+        if (agentContext.getWorkspace() == null || agentContext.getWorkspace().isBlank()) {
+            agentContext.setWorkspace(System.getProperty("user.dir"));
+        }
+
         try {
             return agentLoop.run(agentContext);
         } catch (GraphRunnerException e) {
