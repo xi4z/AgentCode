@@ -1,7 +1,7 @@
 package com.agentcode.service;
 
-import com.agentcode.agent.AgentResult;
+import com.agentcode.agent.AgentStream;
 
 public interface ReactAgentService {
-    AgentResult run(String goal, String runId);
+    AgentStream run(String goal, String runId);
 }

@@ -1,5 +1,6 @@
 package com.agentcode.tool.builtin;
 
+import com.alibaba.cloud.ai.graph.agent.tools.ShellTool;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
