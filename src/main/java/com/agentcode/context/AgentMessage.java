@@ -1,16 +1,18 @@
 package com.agentcode.context;
 
-import io.a2a.spec.Message;
+import com.agentcode.context.block.ContextBlock;
+import lombok.Data;
 
 import java.util.List;
 
+@Data
 public class AgentMessage {
     // TODO: role / content / toolUseId / isError
-    public enum role{
+    public enum Role{
         USER,
         ASSISTANT
     }
 
-    final Message.Role role;
+    final Role role;
     final List<ContextBlock> contexts;
 }

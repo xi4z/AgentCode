@@ -1,5 +1,7 @@
 package com.agentcode.common.model;
 
+import com.agentcode.context.block.ToolCallBlock;
+
 import java.util.List;
 
 /**
