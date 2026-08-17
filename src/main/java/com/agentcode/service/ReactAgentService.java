@@ -1,7 +1,8 @@
 package com.agentcode.service;
 
 import com.agentcode.agent.AgentStream;
+import reactor.core.publisher.Flux;
 
 public interface ReactAgentService {
-    AgentStream run(String goal, String runId);
+    Flux<AgentStream> run(String goal, String runId);
 }

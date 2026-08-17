@@ -26,6 +26,7 @@ public class AgentLoop {
     public Flux<AgentStream> run(AgentContext context) throws GraphRunnerException {
         // TODO 可以根据设定注入可用工具
         ReactAgent reactAgent = ReactAgent.builder()
+                .name("minimal_agent")
                 .model(chatModel)
                 .saver(memorySaver)
                 .systemPrompt(context.systemPrompt())
