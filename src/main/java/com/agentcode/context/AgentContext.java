@@ -21,6 +21,7 @@ public class AgentContext {
 
     public boolean addToolResult(String toolUseId, String content, boolean isError){
         AgentMessage lastMessage = messages.getLast();
+        if (lastMessage) {}
 
     }
 
