@@ -10,6 +10,8 @@ public class AgentContext {
     String goal;
     String result;
     String systemPrompt;
+    String workspace;
+
 
     String globalContext;
     String projectContext;

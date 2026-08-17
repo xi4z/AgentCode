@@ -1,10 +1,14 @@
 package com.agentcode.agent;
 
 import com.agentcode.context.AgentContext;
+import com.agentcode.tools.SearchTools;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
+import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
+import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
+import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
@@ -14,8 +18,13 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.support.ToolCallbacks;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
+
+import java.util.ArrayList;
+import java.util.List;
 
 @Component
 @RequiredArgsConstructor
@@ -29,6 +38,7 @@ public class AgentLoop {
                 .name("minimal_agent")
                 .model(chatModel)
                 .saver(memorySaver)
+                .tools(defaultTools(context))
                 .systemPrompt(context.systemPrompt())
                 .build();
 
@@ -102,5 +112,17 @@ public class AgentLoop {
         }else  {
             return Flux.empty();
         }
+    }
+
+    private List<ToolCallback> defaultTools(AgentContext agentContext) {
+        String workspace = agentContext.getWorkspace();
+        ToolCallback[] shell = ToolCallbacks.from(ShellTool2.builder(workspace).build());
+        ToolCallback grep = GrepSearchTool.builder(workspace).build();
+        ToolCallback build = GlobSearchTool.builder(workspace).build();
+
+        List<ToolCallback> tools = new ArrayList<>(List.of(shell));
+        tools.add(grep);
+        tools.add(build);
+        return tools;
     }
 }
