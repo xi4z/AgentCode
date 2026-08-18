@@ -38,4 +38,9 @@ public class ReActAgentServiceImpl implements ReactAgentService {
             return Flux.error(e);
         }
     }
+
+    @Override
+    public void stop(String runId) {
+
+    }
 }

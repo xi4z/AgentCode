@@ -4,6 +4,7 @@ import com.agentcode.context.AgentContext;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
+import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemTools;
 import com.alibaba.cloud.ai.graph.agent.hook.shelltool.ShellToolAgentHook;
 import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
@@ -34,12 +35,18 @@ public class AgentLoop {
         // TODO 可以根据设定注入可用工具
         String workspace = resolveWorkspace(context);
         ShellTool2 shellTool2 = ShellTool2.builder(workspace).build();
+        FileSystemTools fst = FileSystemTools.builder()
+                .rootDir(workspace)
+                .maxFileSizeMb(10)
+                .build();
+
 
         ReactAgent reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
                 .model(chatModel)
                 .saver(memorySaver)
                 .tools(defaultTools(workspace))
+                .methodTools(fst)
                 .hooks(ShellToolAgentHook.builder()
                         .shellTool2(shellTool2)
                         .shellToolName("shell")
@@ -51,6 +58,7 @@ public class AgentLoop {
         RunnableConfig config = RunnableConfig.builder()
                 .threadId(context.getRunId()) // 获取数据
                 .build();
+
         return reactAgent.stream(context.getGoal(), config).concatMap(this::classifyMessage);
     }
 
@@ -122,6 +130,7 @@ public class AgentLoop {
     private List<ToolCallback> defaultTools(String workspace) {
         ToolCallback grep = GrepSearchTool.builder(workspace).build();
         ToolCallback glob = GlobSearchTool.builder(workspace).build();
+
 
         List<ToolCallback> tools = new ArrayList<>();
         tools.add(grep);
