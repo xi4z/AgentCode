@@ -13,6 +13,7 @@ import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
+import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -20,16 +21,21 @@ import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Component;
+import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 @RequiredArgsConstructor
 public class AgentLoop {
     private final ChatModel chatModel;
     private final MemorySaver memorySaver;
+    @Getter
+    private final ConcurrentHashMap<String, ReactAgent> reactAgentMap = new ConcurrentHashMap<>();
+
 
     public Flux<AgentStream> run(AgentContext context) throws GraphRunnerException {
         // TODO 可以根据设定注入可用工具
@@ -39,7 +45,6 @@ public class AgentLoop {
                 .rootDir(workspace)
                 .maxFileSizeMb(10)
                 .build();
-
 
         ReactAgent reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
@@ -59,7 +64,11 @@ public class AgentLoop {
                 .threadId(context.getRunId()) // 获取数据
                 .build();
 
-        return reactAgent.stream(context.getGoal(), config).concatMap(this::classifyMessage);
+        reactAgentMap.put(context.getRunId(), reactAgent);
+        return reactAgent.stream(context.getGoal(), config).concatMap(this::classifyMessage).doFinally(signalType -> {
+                    reactAgentMap.remove(context.getRunId()); // 移除, 防止溢出
+                }
+        );
     }
 
     private Flux<AgentStream> classifyMessage(NodeOutput nodeOutput) {
