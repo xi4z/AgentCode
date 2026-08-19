@@ -33,19 +33,20 @@ import java.util.List;
 public class AgentSession {
     public AgentSession(AgentContext agentContext, ChatModel chatModel, BaseCheckpointSaver saver) {
         this.agentContext = agentContext;
+        String workspace = resolveWorkspace(agentContext);
         this.reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
                 .model(chatModel)
                 .saver(saver)
                 .tools(List.of(
-                        GrepSearchTool.builder(agentContext.getWorkspace()).build(),
-                        GlobSearchTool.builder(agentContext.getWorkspace()).build())
+                        GrepSearchTool.builder(workspace).build(),
+                        GlobSearchTool.builder(workspace).build())
                 )
                 .methodTools(FileSystemTools.builder()
-                        .rootDir(agentContext.getWorkspace()).maxFileSizeMb(10).build())
+                        .rootDir(workspace).maxFileSizeMb(10).build())
                 .hooks(ShellToolAgentHook.builder()
                         .shellTool2(
-                                ShellTool2.builder(agentContext.getWorkspace()).build()
+                                ShellTool2.builder(workspace).build()
                         )
                         .shellToolName("shell")
                         .build())
@@ -62,7 +63,7 @@ public class AgentSession {
         RUNNING, // 当前会话正在运行
         INTERRUPTED // 当前会话被中断, 出现这种状态的原因通常是 Agent 正在等待用户审批
     }
-    Status status; // 会话状态
+    private volatile Status status = Status.FREE; // 会话状态
 
     final AgentContext agentContext;
     final ReactAgent reactAgent;
@@ -74,17 +75,20 @@ public class AgentSession {
         Disposable disposable;
         Sinks.Many<AgentStream> Sink;
     }
-    private RunningTask runningTask;
+    private volatile RunningTask runningTask;
 
     public Flux<AgentStream> run(String goal){
-        if (!(status == Status.FREE)) {
-            // 此时不允许run
-            throw new AgentAlreadyRunningException("会话:" + agentContext.getRunId() + "正在运行");
+        Sinks.Many<AgentStream> sink;
+        synchronized (this) {
+            if (status != Status.FREE) {
+                // 此时不允许run
+                throw new AgentAlreadyRunningException("会话:" + agentContext.getRunId() + "正在运行");
+            }
+            status = Status.RUNNING;
+            sink = Sinks.many()
+                    .unicast()
+                    .onBackpressureBuffer();
         }
-        status = Status.RUNNING;
-        Sinks.Many<AgentStream> sink = Sinks.many()
-                .unicast()
-                .onBackpressureBuffer();
 
         Disposable disposable;
         try {
@@ -93,43 +97,83 @@ public class AgentSession {
                     .doOnNext(agentStream -> sink.tryEmitNext(agentStream))
                     .doOnComplete(() -> {
                         sink.tryEmitComplete();
-                        runningTask = null;
-                        status = Status.FREE;
+                        synchronized (this) {
+                            runningTask = null;
+                            status = Status.FREE;
+                        }
                     })
                     .doOnError(error -> {
                         sink.tryEmitError(error);
-                        runningTask = null;
-                        status = Status.FREE;
+                        synchronized (this) {
+                            runningTask = null;
+                            status = Status.FREE;
+                        }
                     })
                     .subscribe();
         } catch (GraphRunnerException e) {
             sink.tryEmitError(e);
+            synchronized (this) {
+                runningTask = null;
+                status = Status.FREE;
+            }
             return sink.asFlux();
         }
 
         // 3. 保存 disposable + sink，供 stop() 使用
-        runningTask = new RunningTask(disposable, sink);
+        RunningTask task = new RunningTask(disposable, sink);
+        synchronized (this) {
+            // 如果流已经同步结束，doOnComplete/doOnError 已把 runningTask 置空，不能再放回已完成任务
+            if (status == Status.RUNNING) {
+                runningTask = task;
+            }
+        }
         return sink.asFlux()
-                .doFinally(signal -> runningTask = null);
+                .doFinally(signal -> {
+                    synchronized (this) {
+                        // 只清理当前这次 run 的任务，避免旧流结束时误清新会话的任务
+                        if (runningTask == task) {
+                            runningTask = null;
+                        }
+                    }
+                });
     }
 
     public void stop() {
-        if (status == Status.FREE) {
-            throw new StopFailException("会话: " + this.agentContext.getRunId() + "停止失败, 因为当前会话没有在进行中");
+        RunningTask task;
+        synchronized (this) {
+            if (status == Status.FREE) {
+                throw new StopFailException("会话: " + this.agentContext.getRunId() + "停止失败, 因为当前会话没有在进行中");
+            }
+            task = runningTask;
+            if (task == null) {
+                throw new TaskNotFoundException("当前没有执行任务: " + agentContext.getRunId());
+            }
+
+            // 在锁内先摘引用并置为 FREE，防止重复 stop 或并发 run
+            runningTask = null;
+            status = Status.FREE;
         }
-        if (runningTask == null) {
-            throw new TaskNotFoundException("当前没有执行任务: " + agentContext.getRunId());
-        }
-        runningTask.getDisposable().dispose();
-        runningTask.getSink().tryEmitComplete();
-        runningTask = null;
+
+        // 锁外执行真正的中断/完成通知，避免持锁做耗时或阻塞操作
+        task.getDisposable().dispose();
+        task.getSink().tryEmitComplete();
     }
 
     public void interrupt(String message) {
-        if (status != Status.RUNNING || runningTask == null) {
-            throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "打断失败, 因为当前会话没有在进行中");
+        synchronized (this) {
+            if (status != Status.RUNNING || runningTask == null) {
+                throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "打断失败, 因为当前会话没有在进行中");
+            }
         }
         reactAgent.interrupt(message, config);
+    }
+
+    private String resolveWorkspace(AgentContext agentContext) {
+        String workspace = agentContext.getWorkspace();
+        if (workspace == null || workspace.isBlank()) {
+            return System.getProperty("user.dir");
+        }
+        return workspace;
     }
 
 
