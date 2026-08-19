@@ -4,6 +4,7 @@ import com.agentcode.context.AgentContext;
 import com.agentcode.exception.AgentAlreadyRunningException;
 import com.agentcode.exception.InterruptFailException;
 import com.agentcode.exception.StopFailException;
+import com.agentcode.exception.TaskNotFoundException;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
@@ -116,9 +117,12 @@ public class AgentSession {
         if (status == Status.FREE) {
             throw new StopFailException("会话: " + this.agentContext.getRunId() + "停止失败, 因为当前会话没有在进行中");
         }
-        if (runningTask != null) {
-            runningTask.getDisposable().dispose();
+        if (runningTask == null) {
+            throw new TaskNotFoundException("当前没有执行任务: " + agentContext.getRunId());
         }
+        runningTask.getDisposable().dispose();
+        runningTask.getSink().tryEmitComplete();
+        runningTask = null;
     }
 
     public void interrupt(String message) {
