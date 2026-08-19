@@ -4,6 +4,7 @@ import com.agentcode.agent.AgentHandleInterrupt;
 import com.agentcode.agent.AgentLoop;
 import com.agentcode.agent.AgentStream;
 import com.agentcode.context.AgentContext;
+import com.agentcode.exception.AgentAlreadyRunningException;
 import com.agentcode.exception.AgentContextNotFoundException;
 import com.agentcode.exception.InvalidStatusException;
 import com.agentcode.exception.TaskNotFoundException;
@@ -24,14 +25,18 @@ public class ReActAgentServiceImpl implements ReactAgentService {
 
     private final AgentLoop agentLoop;
     private final InMemoryAgentContextStore agentContextStore;
-    private final ConcurrentHashMap<String, Disposable> runningTasks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Disposable> runningTasks = agentLoop.getRunningTasks();
 
     public Flux<AgentStream> run(String goal, String runId) {
         AgentContext agentContext;
         try{
             agentContext = this.getAgentContext(runId);
+            if (agentContext.getStatus() == AgentContext.Status.RUNNING) {
+                // TODO 当前会话正在 RUNNING 时, 应丢入阻塞队列等待完成后再启动
+            }
         } catch(AgentContextNotFoundException ex){
             agentContext = AgentContext.builder().runId(runId).goal(goal).build();
+            agentContextStore.save(runId, agentContext);
         }
 
 
@@ -44,6 +49,12 @@ public class ReActAgentServiceImpl implements ReactAgentService {
                         .doOnNext(sink::next)
                         .doOnComplete(sink::complete)
                         .doOnError(sink::error)
+                        .doFinally(
+                                signalType -> {
+                                    runningTasks.remove(runId);
+                                    finalAgentContext.setStatus(AgentContext.Status.FREE);
+                                }
+                        )
                         .subscribe();
 
             } catch (GraphRunnerException e) {
@@ -51,11 +62,12 @@ public class ReActAgentServiceImpl implements ReactAgentService {
             }
             if (disposable != null) { // 如果没能成功执行就不推送
                 runningTasks.put(runId, disposable);
+                // 调用方取消/断开时，自动停止内部 Agent
+                sink.onCancel(disposable::dispose);
+                sink.onDispose(disposable::dispose);
             }
-            // 调用方取消/断开时，自动停止内部 Agent
-            sink.onCancel(disposable::dispose);
-            sink.onDispose(disposable::dispose);
             // TODO 需要增加 Task 移除
+            // TODO stop() 与返回的 Flux 生命周期不一致 stop() 只取消内部订阅，没有让外部返回的 Flux 正常结束。调用方可能一直挂住，收不到 complete/error/cancel。
         });
     }
 

@@ -35,7 +35,8 @@ public class AgentLoop {
     private final MemorySaver memorySaver;
     @Getter
     private final ConcurrentHashMap<String, ReactAgent> reactAgentMap = new ConcurrentHashMap<>();
-
+    @Getter
+    private final ConcurrentHashMap<String, Disposable> runningTasks = new ConcurrentHashMap<>();
 
     public Flux<AgentStream> run(AgentContext context) throws GraphRunnerException {
         // TODO 可以根据设定注入可用工具
@@ -65,6 +66,8 @@ public class AgentLoop {
                 .build();
 
         reactAgentMap.put(context.getRunId(), reactAgent);
+        // 修改状态为正在运行
+        context.setStatus(AgentContext.Status.RUNNING);
         return reactAgent.stream(context.getGoal(), config).concatMap(this::classifyMessage).doFinally(signalType -> {
                     reactAgentMap.remove(context.getRunId()); // 移除, 防止溢出
                 }

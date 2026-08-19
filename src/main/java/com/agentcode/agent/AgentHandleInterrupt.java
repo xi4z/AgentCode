@@ -1,5 +1,11 @@
 package com.agentcode.agent;
 
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.Getter;
+
+@AllArgsConstructor
+@Getter
 public class AgentHandleInterrupt {
     public enum Decision{
         APPROVED,
