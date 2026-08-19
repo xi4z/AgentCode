@@ -16,15 +16,11 @@ public class AgentContext {
      * 注入 systemPrompt, globalContext 与 projectContext
      * sessionNotes , workspace 由 model 注入
      */
-    public enum Status{
-        FREE, // 当前会话没有在运行
-        RUNNING, // 当前会话正在运行
-        INTERRUPTED // 当前会话被中断, 出现这种状态的原因通常是 Agent 正在等待用户审批
-    }
+
 
     final String runId;
     String goal;
-    Status status;
+
 
     String result;
     String workspace;

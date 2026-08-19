@@ -9,58 +9,114 @@ import com.alibaba.cloud.ai.graph.agent.hook.shelltool.ShellToolAgentHook;
 import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
+import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
 import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
-import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.tool.ToolCallback;
-import org.springframework.stereotype.Component;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 
-import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
 
-@Component
-@RequiredArgsConstructor
-public class AgentLoop {
-    private final ChatModel chatModel;
-    private final MemorySaver memorySaver;
-    // TODO 需要 ReactAgent, AgentContext, RunningTasks 保持一致性
-
-    @Getter
-    private final ConcurrentHashMap<String, ReactAgent> reactAgentMap = new ConcurrentHashMap<>();
-    @Getter
-    private final ConcurrentHashMap<String, Disposable> runningTasks = new ConcurrentHashMap<>();
-
-    public Flux<AgentStream> run(AgentContext context) throws GraphRunnerException {
-        // TODO 可以根据设定注入可用工具
-        String workspace = resolveWorkspace(context);
-        ShellTool2 shellTool2 = ShellTool2.builder(workspace).build();
-        FileSystemTools fst = FileSystemTools.builder()
-                .rootDir(workspace)
-                .maxFileSizeMb(10)
+public class AgentSession {
+    public AgentSession(AgentContext agentContext, ChatModel chatModel, BaseCheckpointSaver saver) {
+        this.agentContext = agentContext;
+        this.reactAgent = ReactAgent.builder()
+                .name("minimal_agent")
+                .model(chatModel)
+                .saver(saver)
+                .tools(List.of(
+                        GrepSearchTool.builder(agentContext.getWorkspace()).build(),
+                        GlobSearchTool.builder(agentContext.getWorkspace()).build())
+                )
+                .methodTools(FileSystemTools.builder()
+                        .rootDir(agentContext.getWorkspace()).maxFileSizeMb(10).build())
+                .hooks(ShellToolAgentHook.builder()
+                        .shellTool2(
+                                ShellTool2.builder(agentContext.getWorkspace()).build()
+                        )
+                        .shellToolName("shell")
+                        .build())
                 .build();
 
-
-
-
-
-        reactAgentMap.put(context.getRunId(), reactAgent);
-        // 修改状态为正在运行
-        context.setStatus(AgentContext.Status.RUNNING);
-        return reactAgent.stream(context.getGoal(), config).concatMap(this::classifyMessage).doFinally(signalType -> {
-                    reactAgentMap.remove(context.getRunId()); // 移除, 防止溢出
-                }
-        );
+        // 在重新 run 之后, 修改 context 状态
+        this.config = RunnableConfig.builder()
+                .threadId(agentContext.getRunId()) // 获取数据
+                .build();
     }
+
+
+
+
+    public enum Status{
+        FREE, // 当前会话没有在运行
+        RUNNING, // 当前会话正在运行
+        INTERRUPTED // 当前会话被中断, 出现这种状态的原因通常是 Agent 正在等待用户审批
+    }
+    Status status; // 会话状态
+
+    final AgentContext agentContext;
+    final ReactAgent reactAgent;
+    final RunnableConfig config;
+    Disposable runningTask;
+
+    public Flux<AgentStream> run(String goal) throws GraphRunnerException {
+        if (!(status == Status.FREE)) {
+            // TODO 此时需要进入队列中等待
+        }
+        status = Status.RUNNING;
+
+
+        return Flux.create(sink -> {
+            Disposable disposable = null;
+            try {
+                disposable = reactAgent.stream(goal, config).concatMap(this::classifyMessage)
+                        .doOnNext(sink::next)
+                        .doOnComplete(sink::complete)
+                        .doOnError(sink::error)
+                        .doFinally(
+                                signalType -> {
+                                    runningTask = null;
+                                    status = Status.FREE;
+                                }
+                        )
+                        .subscribe();
+
+            } catch (GraphRunnerException e) {
+                sink.error(e);
+            }
+            if (disposable != null) { // 如果没能成功执行就不推送
+                runningTask = disposable;
+                // 调用方取消/断开时，自动停止内部 Agent
+                sink.onCancel(disposable::dispose);
+                sink.onDispose(disposable::dispose);
+            }
+            // TODO 需要增加 Task 移除
+            // TODO stop() 与返回的 Flux 生命周期不一致 stop() 只取消内部订阅，没有让外部返回的 Flux 正常结束。调用方可能一直挂住，收不到 complete/error/cancel。
+        });
+    }
+
+    public void stop() {
+        if (status != Status.RUNNING) {
+            // TODO 此时抛出错误
+        }
+        if (runningTask != null) {
+            runningTask.dispose();
+        }
+    }
+
+    public void interrupt(String message) {
+        if (status != Status.RUNNING || runningTask == null) {
+            return; // TODO 应增加 Exception
+        }
+        reactAgent.interrupt(message, config);
+    }
+
 
     private Flux<AgentStream> classifyMessage(NodeOutput nodeOutput) {
         if (!(nodeOutput instanceof StreamingOutput sop)) {
@@ -125,24 +181,5 @@ public class AgentLoop {
         }else  {
             return Flux.empty();
         }
-    }
-
-    private List<ToolCallback> defaultTools(String workspace) {
-        ToolCallback grep = GrepSearchTool.builder(workspace).build();
-        ToolCallback glob = GlobSearchTool.builder(workspace).build();
-
-
-        List<ToolCallback> tools = new ArrayList<>();
-        tools.add(grep);
-        tools.add(glob);
-        return tools;
-    }
-
-    private String resolveWorkspace(AgentContext agentContext) {
-        String workspace = agentContext.getWorkspace();
-        if (workspace == null || workspace.isBlank()) {
-            return System.getProperty("user.dir");
-        }
-        return workspace;
     }
 }
