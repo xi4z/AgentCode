@@ -1,6 +1,9 @@
 package com.agentcode.agent;
 
 import com.agentcode.context.AgentContext;
+import com.agentcode.exception.AgentAlreadyRunningException;
+import com.agentcode.exception.InterruptFailException;
+import com.agentcode.exception.StopFailException;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
@@ -10,16 +13,19 @@ import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
-import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import okio.Sink;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Sinks;
 
 import java.util.List;
 
@@ -50,9 +56,6 @@ public class AgentSession {
                 .build();
     }
 
-
-
-
     public enum Status{
         FREE, // 当前会话没有在运行
         RUNNING, // 当前会话正在运行
@@ -63,56 +66,64 @@ public class AgentSession {
     final AgentContext agentContext;
     final ReactAgent reactAgent;
     final RunnableConfig config;
-    Disposable runningTask;
 
-    public Flux<AgentStream> run(String goal) throws GraphRunnerException {
+    @AllArgsConstructor
+    @Data
+    private static class RunningTask{
+        Disposable disposable;
+        Sinks.Many<AgentStream> Sink;
+    }
+    private RunningTask runningTask;
+
+    public Flux<AgentStream> run(String goal){
         if (!(status == Status.FREE)) {
-            // TODO 此时需要进入队列中等待
+            // 此时不允许run
+            throw new AgentAlreadyRunningException("会话:" + agentContext.getRunId() + "正在运行");
         }
         status = Status.RUNNING;
+        Sinks.Many<AgentStream> sink = Sinks.many()
+                .unicast()
+                .onBackpressureBuffer();
 
+        Disposable disposable;
+        try {
+            // 2. 启动内部 Agent，把事件转发到 sink
+            disposable = reactAgent.stream(goal, config).concatMap(this::classifyMessage)
+                    .doOnNext(agentStream -> sink.tryEmitNext(agentStream))
+                    .doOnComplete(() -> {
+                        sink.tryEmitComplete();
+                        runningTask = null;
+                        status = Status.FREE;
+                    })
+                    .doOnError(error -> {
+                        sink.tryEmitError(error);
+                        runningTask = null;
+                        status = Status.FREE;
+                    })
+                    .subscribe();
+        } catch (GraphRunnerException e) {
+            sink.tryEmitError(e);
+            return sink.asFlux();
+        }
 
-        return Flux.create(sink -> {
-            Disposable disposable = null;
-            try {
-                disposable = reactAgent.stream(goal, config).concatMap(this::classifyMessage)
-                        .doOnNext(sink::next)
-                        .doOnComplete(sink::complete)
-                        .doOnError(sink::error)
-                        .doFinally(
-                                signalType -> {
-                                    runningTask = null;
-                                    status = Status.FREE;
-                                }
-                        )
-                        .subscribe();
-
-            } catch (GraphRunnerException e) {
-                sink.error(e);
-            }
-            if (disposable != null) { // 如果没能成功执行就不推送
-                runningTask = disposable;
-                // 调用方取消/断开时，自动停止内部 Agent
-                sink.onCancel(disposable::dispose);
-                sink.onDispose(disposable::dispose);
-            }
-            // TODO 需要增加 Task 移除
-            // TODO stop() 与返回的 Flux 生命周期不一致 stop() 只取消内部订阅，没有让外部返回的 Flux 正常结束。调用方可能一直挂住，收不到 complete/error/cancel。
-        });
+        // 3. 保存 disposable + sink，供 stop() 使用
+        runningTask = new RunningTask(disposable, sink);
+        return sink.asFlux()
+                .doFinally(signal -> runningTask = null);
     }
 
     public void stop() {
-        if (status != Status.RUNNING) {
-            // TODO 此时抛出错误
+        if (status == Status.FREE) {
+            throw new StopFailException("会话: " + this.agentContext.getRunId() + "停止失败, 因为当前会话没有在进行中");
         }
         if (runningTask != null) {
-            runningTask.dispose();
+            runningTask.getDisposable().dispose();
         }
     }
 
     public void interrupt(String message) {
         if (status != Status.RUNNING || runningTask == null) {
-            return; // TODO 应增加 Exception
+            throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "打断失败, 因为当前会话没有在进行中");
         }
         reactAgent.interrupt(message, config);
     }

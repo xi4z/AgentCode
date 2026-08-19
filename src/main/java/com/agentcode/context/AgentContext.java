@@ -7,8 +7,6 @@ import lombok.RequiredArgsConstructor;
 
 @Data
 @Builder
-@RequiredArgsConstructor
-@AllArgsConstructor
 public class AgentContext {
     /**
      * AgentContext 流程:
@@ -17,38 +15,22 @@ public class AgentContext {
      * sessionNotes , workspace 由 model 注入
      */
 
-
     final String runId;
     String goal;
-
-
-    String result;
     String workspace;
 
-
-    // 系统提示词 应固定且不应更改
-    final String systemPrompt;
-    String globalContext; // 全局提示词, 这个提示词由用户自定义且挂在到用户目录
-    String projectContext; // 项目提示词, 可以在项目内自定义为agent.md, 读取即可
     String sessionNotes; // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
 
-    public String systemPrompt() {
-        StringBuilder sb = new StringBuilder();
-        if (globalContext != null && !globalContext.isBlank()) {
-            sb.append("\n\n## Global Context\n").append(globalContext);
-        }
-        if (projectContext != null && !projectContext.isBlank()) {
-            sb.append("\n\n## Project Context\n").append(projectContext);
-        }
-        if (sessionNotes != null && !sessionNotes.isBlank()) {
-            sb.append("\n\n## Session Notes\n").append(sessionNotes);
-        }
+    public String systemPrompt(String systemPrompt) {
+        StringBuilder sb = new StringBuilder("system");
         return sb.toString();
     }
 
     /**
-     * 注入上下文
+     * TODO 解析项目的提示词
      * @param workspace
      */
-    private void injectContext(String workspace) {}
+    private String parseProjectContext(String workspace) {
+        return new String(workspace);
+    }
 }

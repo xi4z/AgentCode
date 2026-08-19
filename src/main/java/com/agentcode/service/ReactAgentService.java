@@ -12,10 +12,11 @@ public interface ReactAgentService {
     /**
      * 进行执行指令
      * @param goal
-     * @param runId
      * @return
      */
-    Flux<AgentStream> run(String goal, String runId);
+    Flux<AgentStream> startNewSession(String goal, String workspace); // 新建 AgentContext
+    Flux<AgentStream> run(String goal, String runId); // 跑已有 AgentContext
+
 
     void stop(String runId); // 直接中断会话
 

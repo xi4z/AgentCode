@@ -1,88 +1,62 @@
 package com.agentcode.service.Impl;
 
 import com.agentcode.agent.AgentHandleInterrupt;
-import com.agentcode.agent.AgentLoop;
+import com.agentcode.agent.AgentSession;
 import com.agentcode.agent.AgentStream;
 import com.agentcode.context.AgentContext;
-import com.agentcode.exception.AgentAlreadyRunningException;
-import com.agentcode.exception.AgentContextNotFoundException;
-import com.agentcode.exception.InvalidStatusException;
-import com.agentcode.exception.TaskNotFoundException;
+import com.agentcode.exception.*;
 import com.agentcode.service.ReactAgentService;
 import com.agentcode.store.InMemoryAgentContextStore;
-import com.alibaba.cloud.ai.graph.RunnableConfig;
-import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
+import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
 import lombok.RequiredArgsConstructor;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Service;
-import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 @RequiredArgsConstructor
 public class ReActAgentServiceImpl implements ReactAgentService {
 
-    private final AgentLoop agentLoop;
     private final InMemoryAgentContextStore agentContextStore;
-    private final ConcurrentHashMap<String, Disposable> runningTasks = agentLoop.getRunningTasks();
+    private final ChatModel chatModel;
+    private final MemorySaver memorySaver;
+    private final ConcurrentHashMap<String, AgentSession> sessions = new  ConcurrentHashMap<>();
 
+
+    @Override
+    public Flux<AgentStream> startNewSession(String goal, String workspace) {
+        AgentContext context = AgentContext.builder()
+                .runId(UUID.randomUUID().toString())
+                .workspace(workspace)
+                .goal(goal).build();
+        agentContextStore.save(context.getRunId(), context);
+        return run(goal, context.getRunId());
+    }
+
+    @Override
     public Flux<AgentStream> run(String goal, String runId) {
-        AgentContext agentContext;
-        try{
-            agentContext = this.getAgentContext(runId);
-            if (agentContext.getStatus() == AgentContext.Status.RUNNING) {
-                // TODO 当前会话正在 RUNNING 时, 应丢入阻塞队列等待完成后再启动
-            }
-        } catch(AgentContextNotFoundException ex){
-            agentContext = AgentContext.builder().runId(runId).goal(goal).build();
-            agentContextStore.save(runId, agentContext);
+        AgentContext agentContext = getAgentContext(runId);
+        AgentSession session;
+        try {
+            session = this.getAgentSession(runId);
+        } catch (SessionNotFoundException e) {
+            session = new AgentSession(agentContext, chatModel, memorySaver);
+            sessions.put(runId, session);
         }
 
-
-        // Spring Ai Alibaba 最佳实践: 可以随时暂停且不引入更多的变量
-        AgentContext finalAgentContext = agentContext;
-        return Flux.create(sink -> {
-            Disposable disposable = null;
-            try {
-                disposable = agentLoop.run(finalAgentContext)
-                        .doOnNext(sink::next)
-                        .doOnComplete(sink::complete)
-                        .doOnError(sink::error)
-                        .doFinally(
-                                signalType -> {
-                                    runningTasks.remove(runId);
-                                    finalAgentContext.setStatus(AgentContext.Status.FREE);
-                                }
-                        )
-                        .subscribe();
-
-            } catch (GraphRunnerException e) {
-                sink.error(e);
-            }
-            if (disposable != null) { // 如果没能成功执行就不推送
-                runningTasks.put(runId, disposable);
-                // 调用方取消/断开时，自动停止内部 Agent
-                sink.onCancel(disposable::dispose);
-                sink.onDispose(disposable::dispose);
-            }
-            // TODO 需要增加 Task 移除
-            // TODO stop() 与返回的 Flux 生命周期不一致 stop() 只取消内部订阅，没有让外部返回的 Flux 正常结束。调用方可能一直挂住，收不到 complete/error/cancel。
-        });
+        // TODO 在限定时间内可清理超过半个小时不使用的session 或在到达额度时清理掉最长时间不使用的session
+        return session.run(goal);
     }
 
     @Override
     public void stop(String runId) {
         // 先检查能否拿到上下文且不抛出错误
         getAgentContext(runId);
+        getAgentSession(runId).stop();
 
-        // 再检查任务是否存在
-        if (runningTasks.containsKey(runId)) {
-            runningTasks.get(runId).dispose();
-            runningTasks.remove(runId);
-        }else {
-            throw new TaskNotFoundException("当前没有执行任务: " + runId);
-        }
     }
 
     @Override
@@ -94,21 +68,21 @@ public class ReActAgentServiceImpl implements ReactAgentService {
     public void interrupt(String runId, String guidanceMessage) {
         // 先确定这个 runId 是否存在
         AgentContext agentContext = getAgentContext(runId);
-        // 不在运行中时则抛出错误
-        if (!agentContext.getStatus().equals(AgentContext.Status.RUNNING)) {
-            throw new InvalidStatusException("当前会话的状态为: " + agentContext.getStatus().toString() + " , 必须是 RUNNING 时才可打断");
-        } else if (!runningTasks.containsKey(runId)) {
-            throw new TaskNotFoundException("当前没有执行任务: " + runId);
-        }
-
-        agentLoop.getReactAgentMap().get(runId).interrupt(guidanceMessage, RunnableConfig.builder()
-                        .threadId(runId).build());
+        getAgentSession(runId).interrupt(guidanceMessage);
     }
 
     private AgentContext getAgentContext(String runId) {
         if (agentContextStore.find(runId).isEmpty()) {
-            throw new AgentContextNotFoundException("该会话不存在: " + runId);
+            throw new AgentContextNotFoundException(runId);
         }
         return agentContextStore.find(runId).get();
+    }
+
+    private AgentSession getAgentSession(String runId) {
+        AgentSession session = this.sessions.get(runId);
+        if (session == null) {
+            throw new SessionNotFoundException(runId);
+        }
+        return session;
     }
 }
