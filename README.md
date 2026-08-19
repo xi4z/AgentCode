@@ -57,3 +57,13 @@ mvn clean compile
 mvn test
 mvn spring-boot:run
 ```
+
+
+
+
+
+# 参考资料
+
+- [Spring AI Alibaba Docs](https://www.java2ai.com/docs/quick-start/)
+- [Spring AI Alibaba GitHub](https://github.com/alibaba/spring-ai-alibaba)
+
