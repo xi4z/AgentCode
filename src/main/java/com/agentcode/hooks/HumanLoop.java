@@ -5,7 +5,7 @@ import com.alibaba.cloud.ai.graph.agent.hook.hip.HumanInTheLoopHook;
 public class HumanLoop {
     private HumanLoop() {
         HumanInTheLoopHook.builder()
-                .approvalOn()
-                .build()
+                .approvalOn(java.util.Map.of())
+                .build();
     }
 }

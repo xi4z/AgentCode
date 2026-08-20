@@ -37,9 +37,25 @@ import reactor.core.publisher.Sinks;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.regex.Pattern;
 
 public class AgentSession {
+
+    // 检测 bash 命令是否操作 cwd 之外路径的正则规则列表（强制触发 ASK，不可被 allow 名单绕过）
+    private static final List<Pattern> OUTSIDE_CWD_PATTERNS = List.of(
+            Pattern.compile("(^|\\s)/[^\\s]"),              // absolute path
+            Pattern.compile("(^|\\s)~"),                    // tilde home
+            Pattern.compile("(^|\\s)\\.\\.(/|$|\\s)"),      // parent traversal
+            Pattern.compile("\\$\\{?HOME\\b"),              // $HOME variable
+            Pattern.compile("\\$\\{?PWD\\b"),               // $PWD variable
+            Pattern.compile("(^|\\s|;|&&|\\|\\|)cd(\\s|$)") // explicit cd
+    );
+
     public AgentSession(AgentContext agentContext, ChatModel chatModel, BaseCheckpointSaver saver) {
         this.agentContext = agentContext;
         String workspace = resolveWorkspace(agentContext);
@@ -85,6 +101,10 @@ public class AgentSession {
         Sinks.Many<AgentStream> Sink;
     }
     private volatile RunningTask runningTask;
+
+    // 当前会话已放行的命令缓存：精确命令 + 通配符模式（仅内存，不持久化）
+    private final Set<String> sessionApprovedCommands = ConcurrentHashMap.newKeySet();
+    private final List<Pattern> sessionApprovedPatterns = new CopyOnWriteArrayList<>();
 
     public Flux<AgentStream> run(String goal){
         Sinks.Many<AgentStream> sink;
@@ -187,11 +207,10 @@ public class AgentSession {
 
 
     private Flux<AgentStream> classifyMessage(NodeOutput nodeOutput) {
-        if (!(nodeOutput instanceof StreamingOutput sop) && !(nodeOutput instanceof InterruptionMetadata)) {
-            return Flux.empty();
-        }
         if (nodeOutput instanceof InterruptionMetadata metadata) {
-            preHandleAgentInterrupt(metadata)
+            return preHandleAgentInterrupt(metadata);
+        }
+        if (!(nodeOutput instanceof StreamingOutput sop)) {
             return Flux.empty();
         }
         OutputType type = sop.getOutputType();
@@ -285,41 +304,196 @@ public class AgentSession {
             // 当前只拦截 write_file, edit 与 shell
             if (!feedback.getName().equalsIgnoreCase("shell")){
                 // 此时检查工作目录即可
-                if (checkPathValid(feedback.getArguments()))
-            }else {
+                if (checkPathValid(feedback.getArguments())) {
+                    // TODO 路径合法时按后续审批策略决定自动放行或继续询问
+                }
+            } else {
                 // 检查 shell, 需要对可能的多重指令进行拆分并尝试进行模式匹配
-
+                String command = extractShellCommand(feedback.getArguments());
+                // 静态评估通过，或当前会话已经放行过这条命令/这类命令，则无需再人工审批
+                if (checkCommandValid(command) || isSessionApproved(command)) {
+                    // TODO 自动放行/恢复执行
+                } else {
+                    // TODO 发送 WebSocket 审批请求；用户选择 APPROVE_ALL 时调用
+                    //      approveCommandForSession(command) / approvePatternForSession(pattern)
+                }
             }
-
         }
-
-
+        // TODO 审批/自动放行逻辑尚未接入 WebSocket，先不向调用方输出额外事件
+        return Flux.empty();
     }
 
     /**
-     * 检查 Shell 参数
-     * @param feedback
-     * @return
+     * 从工具参数 JSON 中解析出 shell command
      */
-    private boolean checkShellValid(InterruptionMetadata.ToolFeedback feedback) {
-        String command = "";
-        try { // 先从 json 中解析出 command
+    private String extractShellCommand(String arguments) {
+        try {
             ObjectMapper mapper = new ObjectMapper();
-            JsonNode root = mapper.readTree(feedback.getArguments());
-            command = root.path("command").asText();
+            JsonNode root = mapper.readTree(arguments);
+            return root.path("command").asText();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
-
-        List<String> commands = ShellHelper.splitCommand(command);
-
     }
 
+    /**
+     * 检查 Shell 参数：解析 command 后交给静态评估
+     * @param feedback
+     * @return true 表示静态评估通过（可自动放行），false 表示需要人工审批/拒绝
+     */
+    private boolean checkShellValid(InterruptionMetadata.ToolFeedback feedback) {
+        return checkCommandValid(extractShellCommand(feedback.getArguments()));
+    }
+
+    /**
+     * bash 命令静态评估：返回是否允许自动放行。
+     * 移植自 Python 分支 permission/policy.py：
+     * deny_patterns → outside-cwd 强制 ASK → allow_patterns → default(ASK)
+     */
     private boolean checkCommandValid(String command) {
+        if (command == null || command.isBlank()) {
+            return false;
+        }
 
-
-
+        // 复合命令（| ; && ||）拆成多个子命令，只要有一个不满足就整体不自动放行
+        for (String segment : splitShellSegments(command)) {
+            if (!checkSingleCommandValid(segment)) {
+                return false;
+            }
+        }
+        return true;
     }
+
+    /**
+     * 单条命令的静态评估：命中黑名单/越界则 false，命中安全名单则 true，否则默认 false
+     */
+    private boolean checkSingleCommandValid(String segment) {
+        if (segment == null || segment.isBlank()) {
+            return false;
+        }
+
+        // outside-cwd 强制 ASK，不允许被安全名单绕过
+        if (matchesOutsideCwd(segment)) {
+            return false;
+        }
+
+        List<String> tokens = ShellHelper.splitCommand(segment);
+        if (tokens.isEmpty()) {
+            return false;
+        }
+        String commandName = tokens.get(0);
+
+        // deny_patterns：危险命令黑名单，命中不允许自动放行
+        if (ShellHelper.DANGEROUS_COMMANDS.contains(commandName)) {
+            return false;
+        }
+
+        // allow_patterns：安全命令名单，命中自动放行
+        if (ShellHelper.safeCommands.contains(commandName)) {
+            return true;
+        }
+
+        // 默认策略：bash 默认 ASK，未命中任何名单时交给人工审批
+        return false;
+    }
+
+    /**
+     * 将命令按 shell 运算符拆成多个子命令片段
+     */
+    private List<String> splitShellSegments(String command) {
+        List<String> tokens = ShellHelper.splitCommand(command);
+        List<String> segments = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+
+        for (String token : tokens) {
+            if (isShellOperator(token)) {
+                if (!current.isEmpty()) {
+                    segments.add(current.toString());
+                    current.setLength(0);
+                }
+            } else {
+                if (!current.isEmpty()) {
+                    current.append(' ');
+                }
+                current.append(token);
+            }
+        }
+        if (!current.isEmpty()) {
+            segments.add(current.toString());
+        }
+        return segments;
+    }
+
+    /**
+     * 判断 token 是否为 shell 运算符
+     */
+    private boolean isShellOperator(String token) {
+        return token.equals("&&") || token.equals("||")
+                || token.equals("|") || token.equals(";");
+    }
+
+    /**
+     * 判断命令是否命中 outside-cwd 启发式规则
+     */
+    private boolean matchesOutsideCwd(String command) {
+        for (Pattern pattern : OUTSIDE_CWD_PATTERNS) {
+            if (pattern.matcher(command).find()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断命令是否已在当前会话中被批准（精确命令或通配符模式）
+     */
+    public boolean isSessionApproved(String command) {
+        if (command == null || command.isBlank()) {
+            return false;
+        }
+        String normalized = command.trim();
+        if (sessionApprovedCommands.contains(normalized)) {
+            return true;
+        }
+        for (Pattern pattern : sessionApprovedPatterns) {
+            if (pattern.matcher(normalized).matches()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 记录当前会话放行一条具体命令
+     */
+    public void approveCommandForSession(String command) {
+        if (command == null || command.isBlank()) {
+            return;
+        }
+        sessionApprovedCommands.add(command.trim());
+    }
+
+    /**
+     * 记录当前会话放行一类命令（shell 通配符，* 匹配任意串，? 匹配单个字符）
+     */
+    public void approvePatternForSession(String pattern) {
+        if (pattern == null || pattern.isBlank()) {
+            return;
+        }
+        sessionApprovedPatterns.add(compileShellWildcard(pattern.trim()));
+    }
+
+    /**
+     * 将 shell 通配符转成正则表达式
+     */
+    private Pattern compileShellWildcard(String pattern) {
+        String regex = pattern
+                .replace(".", "\\.")
+                .replace("*", ".*")
+                .replace("?", ".");
+        return Pattern.compile(regex);
+    }
+
     private boolean checkPathValid(String path) {
         // TODO 传过来的参数应该是json化的,需要提取出目录
         ObjectMapper mapper = new ObjectMapper();

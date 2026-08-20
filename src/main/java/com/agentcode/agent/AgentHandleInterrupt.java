@@ -9,6 +9,7 @@ import lombok.Getter;
 public class AgentHandleInterrupt {
     public enum Decision{
         APPROVED,
+        APPROVE_ALL,
         REJECTED,
         EDITED
     }
