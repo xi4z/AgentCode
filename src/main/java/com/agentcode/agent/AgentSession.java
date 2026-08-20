@@ -1,5 +1,6 @@
 package com.agentcode.agent;
 
+import com.agentcode.common.ShellHelper;
 import com.agentcode.context.AgentContext;
 import com.agentcode.exception.AgentAlreadyRunningException;
 import com.agentcode.exception.InterruptFailException;
@@ -7,16 +8,22 @@ import com.agentcode.exception.StopFailException;
 import com.agentcode.exception.TaskNotFoundException;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
+import com.alibaba.cloud.ai.graph.action.Command;
+import com.alibaba.cloud.ai.graph.action.InterruptionMetadata;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemTools;
+import com.alibaba.cloud.ai.graph.agent.hook.InterruptionHook;
 import com.alibaba.cloud.ai.graph.agent.hook.shelltool.ShellToolAgentHook;
 import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
+import com.alibaba.cloud.ai.graph.agent.tools.ShellTool;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import okio.Sink;
@@ -28,6 +35,8 @@ import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.List;
 
 public class AgentSession {
@@ -178,15 +187,22 @@ public class AgentSession {
 
 
     private Flux<AgentStream> classifyMessage(NodeOutput nodeOutput) {
-        if (!(nodeOutput instanceof StreamingOutput sop)) {
+        if (!(nodeOutput instanceof StreamingOutput sop) && !(nodeOutput instanceof InterruptionMetadata)) {
             return Flux.empty();
         }
-
+        if (nodeOutput instanceof InterruptionMetadata metadata) {
+            preHandleAgentInterrupt(metadata)
+            return Flux.empty();
+        }
         OutputType type = sop.getOutputType();
         Message message = sop.message();
         AgentStream agentStream = null;
-        // 处理流式输出
+        // 如果当前是工具审批中断:
 
+
+
+
+        // 处理流式输出
         if (message instanceof AssistantMessage assistantMessage){
             Object thinking = assistantMessage.getMetadata().get("reasoningContent");
             boolean isThinking = thinking != null && !thinking.toString().isEmpty();
@@ -240,5 +256,91 @@ public class AgentSession {
         }else  {
             return Flux.empty();
         }
+    }
+
+    /**
+     * 用于预处理需要 HumanInLoop 环节的信息
+     * shell write 工具 默认需要 interrupt.
+     * 但是用户可能期望他们已经批准过的指令不要再次打扰他们, 于是可能会设置使用通配符来统一过滤已经过滤过的指令
+     * 即有四个选项
+     * 1. 同意(APPROVE)
+     * 2. 在本会话中一律批准满足通配符的指令(APPROVE_ALL)
+     * 3. 拒绝(REJECT)
+     * 4. 修改意见(EDIT)
+     * --
+     * 1. 将复合指令拆成多个指令, 比如以 | 连接的, 再走模式匹配
+     * 2. 检查是否命中黑名单, 比如 rm 等, 命中一律确认
+     * 3. 检查是否突破工作目录, 突破一律确认
+     * 4. 走缓存, 如果缓存没有确认
+     * 5. 工具的默认策略, 当然工具也有缓存
+     *
+     * 应该使用 WebSocket 向用户发送 WebSocket 信息. 并等待接收
+     * @param metadata
+     * @return
+     */
+    private Flux<AgentStream> preHandleAgentInterrupt(InterruptionMetadata metadata) {
+        // 先检查工具类型, 如果是 shell 先拆分指令然后走 shell 处理路线
+        List<InterruptionMetadata.ToolFeedback> toolFeedbacks = metadata.toolFeedbacks();
+        for (InterruptionMetadata.ToolFeedback feedback : toolFeedbacks) {
+            // 当前只拦截 write_file, edit 与 shell
+            if (!feedback.getName().equalsIgnoreCase("shell")){
+                // 此时检查工作目录即可
+                if (checkPathValid(feedback.getArguments()))
+            }else {
+                // 检查 shell, 需要对可能的多重指令进行拆分并尝试进行模式匹配
+
+            }
+
+        }
+
+
+    }
+
+    /**
+     * 检查 Shell 参数
+     * @param feedback
+     * @return
+     */
+    private boolean checkShellValid(InterruptionMetadata.ToolFeedback feedback) {
+        String command = "";
+        try { // 先从 json 中解析出 command
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode root = mapper.readTree(feedback.getArguments());
+            command = root.path("command").asText();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+        List<String> commands = ShellHelper.splitCommand(command);
+
+    }
+
+    private boolean checkCommandValid(String command) {
+
+
+
+    }
+    private boolean checkPathValid(String path) {
+        // TODO 传过来的参数应该是json化的,需要提取出目录
+        ObjectMapper mapper = new ObjectMapper();
+        String filePath = "";
+        try {
+            JsonNode root = mapper.readTree(path);
+            filePath = root.path("filepath").asText();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        if (filePath.isEmpty()){
+            return false;
+        }
+        Path basePath = Paths.get(agentContext.getWorkspace()).toAbsolutePath().normalize();
+        Path resolvedPath = basePath.resolve(filePath);
+        Path normalizedPath = resolvedPath.normalize();
+        return normalizedPath.startsWith(basePath);
+    }
+
+    private void buildApprovalRequest(String description){
+        // 组装请求并传送至 WebSocket
+
     }
 }
