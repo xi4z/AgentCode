@@ -328,6 +328,7 @@ public class AgentSession {
      * @return
      */
     private Flux<AgentStream> preHandleAgentInterrupt(InterruptionMetadata metadata) {
+        status = Status.INTERRUPTED;
         // 先检查工具类型, 如果是 shell 先拆分指令然后走 shell 处理路线
         List<InterruptionMetadata.ToolFeedback> toolFeedbacks = metadata.toolFeedbacks();
         // 已经被处理的 interruption
