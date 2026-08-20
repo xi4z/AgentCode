@@ -15,7 +15,8 @@ public record AgentStream(
         RESPONSE_STREAMING,
         RESPONSE_FINISHED,
         TOOL_STREAMING,
-        TOOL_FINISHED
+        TOOL_FINISHED,
+        PERMISSION_REQUESTED
     }
 
 

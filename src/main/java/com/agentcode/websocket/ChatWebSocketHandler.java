@@ -1,5 +1,6 @@
 package com.agentcode.websocket;
 
+import com.agentcode.agent.AgentInterruptHandle;
 import com.agentcode.agent.AgentStream;
 import com.agentcode.context.AgentContext;
 import com.agentcode.service.ReactAgentService;
@@ -7,6 +8,7 @@ import com.agentcode.store.InMemoryAgentContextStore;
 import com.agentcode.websocket.ChatProtocol.ClientMessage;
 import com.agentcode.websocket.ChatProtocol.ServerMessage;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -14,12 +16,14 @@ import org.springframework.web.reactive.socket.WebSocketHandler;
 import org.springframework.web.reactive.socket.WebSocketMessage;
 import org.springframework.web.reactive.socket.WebSocketSession;
 import reactor.core.Disposable;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * WebSocket 端点：/ws/chat
@@ -29,6 +33,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * - chat：基于已有 runId 继续多轮对话
  * - stop：停止当前任务
  * - interrupt：打断当前思考并给出引导
+ * - permission_respond：响应服务器发起的权限审批请求
  * - ping：心跳
  */
 @Component
@@ -85,6 +90,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
             case "chat" -> chat(session, message, outbound);
             case "stop" -> stop(message, outbound);
             case "interrupt" -> interrupt(message, outbound);
+            case "permission_respond" -> permissionRespond(session, message, outbound);
             case "ping" -> send(outbound, ServerMessage.pong(message.requestId()));
             default -> send(outbound, ServerMessage.error(message.requestId(), null,
                     "未知消息类型: " + message.type()));
@@ -128,14 +134,31 @@ public class ChatWebSocketHandler implements WebSocketHandler {
 
     private void subscribeAgent(WebSocketSession session, String requestId, String runId, String goal,
                                 Sinks.Many<String> outbound) {
+        subscribe(session, requestId, runId, agentService.run(goal, runId), outbound);
+    }
+
+    private void subscribe(WebSocketSession session, String requestId, String runId,
+                           Flux<AgentStream> stream, Sinks.Many<String> outbound) {
         String connectionId = session == null ? null : session.getId();
         String key = connectionId == null ? ":" + runId : connectionId + ":" + runId;
 
         Disposable disposable;
         try {
-            disposable = agentService.run(goal, runId)
-                    .doOnNext(event -> send(outbound, ServerMessage.agentEvent(runId, event)))
-                    .doOnComplete(() -> send(outbound, ServerMessage.done(runId)))
+            AtomicBoolean permissionRequested = new AtomicBoolean(false);
+            disposable = stream
+                    .doOnNext(event -> {
+                        if (event.status() == AgentStream.Status.PERMISSION_REQUESTED) {
+                            permissionRequested.set(true);
+                            sendPermissionRequests(outbound, requestId, runId, event.content());
+                        } else {
+                            send(outbound, ServerMessage.agentEvent(runId, event));
+                        }
+                    })
+                    .doOnComplete(() -> {
+                        if (!permissionRequested.get()) {
+                            send(outbound, ServerMessage.done(runId));
+                        }
+                    })
                     .doOnError(error -> send(outbound, ServerMessage.error(requestId, runId, error.getMessage())))
                     .doFinally(signal -> subscriptions.remove(key))
                     .subscribe();
@@ -147,6 +170,63 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         Disposable previous = subscriptions.put(key, disposable);
         if (previous != null && !previous.isDisposed()) {
             previous.dispose();
+        }
+    }
+
+    private void sendPermissionRequests(Sinks.Many<String> outbound, String requestId, String runId,
+                                        String permissionJson) {
+        try {
+            JsonNode array = objectMapper.readTree(permissionJson);
+            if (array.isArray()) {
+                for (JsonNode node : array) {
+                    send(outbound, ServerMessage.permissionRequested(
+                            requestId,
+                            runId,
+                            node.path("toolCallId").asText(null),
+                            node.path("toolName").asText(null),
+                            node.path("arguments").asText(null),
+                            node.path("description").asText(null)
+                    ));
+                }
+            }
+        } catch (Exception e) {
+            send(outbound, ServerMessage.error(requestId, runId, "权限请求解析失败: " + e.getMessage()));
+        }
+    }
+
+    private void permissionRespond(WebSocketSession session, ClientMessage message, Sinks.Many<String> outbound) {
+        if (message.runId() == null || message.runId().isBlank()
+                || message.toolCallId() == null || message.toolCallId().isBlank()
+                || message.decision() == null || message.decision().isBlank()) {
+            send(outbound, ServerMessage.error(message.requestId(), message.runId(),
+                    "permission_respond 需要 runId、toolCallId、decision"));
+            return;
+        }
+
+        AgentInterruptHandle.Decision decision;
+        try {
+            decision = AgentInterruptHandle.Decision.valueOf(message.decision().trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            send(outbound, ServerMessage.error(message.requestId(), message.runId(),
+                    "未知 decision: " + message.decision() + "，可选 APPROVED/APPROVE_ALL/REJECTED/EDITED"));
+            return;
+        }
+
+        AgentInterruptHandle handle = new AgentInterruptHandle(
+                message.runId(),
+                message.toolCallId(),
+                message.toolName(),
+                message.arguments(),
+                null,
+                decision,
+                message.feedback()
+        );
+
+        try {
+            subscribe(session, message.requestId(), message.runId(),
+                    agentService.handleInterrupt(handle), outbound);
+        } catch (Exception e) {
+            send(outbound, ServerMessage.error(message.requestId(), message.runId(), e.getMessage()));
         }
     }
 

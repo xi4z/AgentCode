@@ -60,8 +60,9 @@ public class ReActAgentServiceImpl implements ReactAgentService {
     }
 
     @Override
-    public void handleInterrupt(AgentInterruptHandle handle) {
-        // TODO 需要根据传参来确定如何进行
+    public Flux<AgentStream> handleInterrupt(AgentInterruptHandle handle) {
+        return getAgentSession(handle.getRunId())
+                .handleAgentInterrupt(new AgentInterruptHandle[]{handle});
     }
 
     @Override

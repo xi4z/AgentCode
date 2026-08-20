@@ -23,8 +23,9 @@ public interface ReactAgentService {
     /**
      * 处理 Agent 因为权限审批而造成的中断
      * @param handle
+     * @return 恢复后的 Agent 事件流
      */
-    void handleInterrupt(AgentInterruptHandle handle);
+    Flux<AgentStream> handleInterrupt(AgentInterruptHandle handle);
 
     /**
      * 对正在进行中的 Agent 行动做出引导, 此时 Status 必须为 Running

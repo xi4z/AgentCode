@@ -11,6 +11,9 @@ import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.action.InterruptionMetadata;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemTools;
+import com.alibaba.cloud.ai.graph.agent.hook.Hook;
+import com.alibaba.cloud.ai.graph.agent.hook.hip.HumanInTheLoopHook;
+import com.alibaba.cloud.ai.graph.agent.hook.hip.ToolConfig;
 import com.alibaba.cloud.ai.graph.agent.hook.shelltool.ShellToolAgentHook;
 import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
@@ -19,6 +22,7 @@ import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
@@ -29,12 +33,15 @@ import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -56,9 +63,34 @@ public class AgentSession {
     );
 
     public AgentSession(AgentContext agentContext, ChatModel chatModel, BaseCheckpointSaver saver) {
+        this(agentContext, chatModel, saver, List.of("shell", "write_file"));
+    }
+
+    public AgentSession(AgentContext agentContext, ChatModel chatModel, BaseCheckpointSaver saver,
+                        List<String> approvalTools) {
         this.agentContext = agentContext;
         this.saver = saver;
+        this.approvalTools = approvalTools == null ? List.of() : List.copyOf(approvalTools);
         String workspace = resolveWorkspace(agentContext);
+        this.shellTool2 = ShellTool2.builder(workspace).build();
+
+        List<Hook> hooks = new ArrayList<>();
+        hooks.add(ShellToolAgentHook.builder()
+                .shellTool2(shellTool2)
+                .shellToolName("shell")
+                .build());
+
+        // 需要人工审批的工具通过 HumanInTheLoopHook 在调用前中断
+        if (!this.approvalTools.isEmpty()) {
+            HumanInTheLoopHook.Builder hitlBuilder = HumanInTheLoopHook.builder();
+            for (String tool : this.approvalTools) {
+                hitlBuilder.approvalOn(tool, ToolConfig.builder()
+                        .description("该工具调用需要人工审批")
+                        .build());
+            }
+            hooks.add(hitlBuilder.build());
+        }
+
         this.reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
                 .model(chatModel)
@@ -69,12 +101,7 @@ public class AgentSession {
                 )
                 .methodTools(FileSystemTools.builder()
                         .rootDir(workspace).maxFileSizeMb(10).build())
-                .hooks(ShellToolAgentHook.builder()
-                        .shellTool2(
-                                ShellTool2.builder(workspace).build()
-                        )
-                        .shellToolName("shell")
-                        .build())
+                .hooks(hooks)
                 .build();
 
         // 在重新 run 之后, 修改 context 状态
@@ -93,7 +120,12 @@ public class AgentSession {
     final BaseCheckpointSaver saver;
     final AgentContext agentContext;
     final ReactAgent reactAgent;
+    final List<String> approvalTools;
+    final ShellTool2 shellTool2;
     RunnableConfig config;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private volatile InterruptionMetadata pendingInterruption;
 
     @AllArgsConstructor
     @Data
@@ -108,6 +140,10 @@ public class AgentSession {
     private final List<Pattern> sessionApprovedPatterns = new CopyOnWriteArrayList<>();
 
     public Flux<AgentStream> run(String goal){
+        return run(goal, config);
+    }
+
+    private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
         Sinks.Many<AgentStream> sink;
         synchronized (this) {
             if (status == Status.RUNNING) {
@@ -122,20 +158,25 @@ public class AgentSession {
         Disposable disposable;
         try {
             // 2. 启动内部 Agent，把事件转发到 sink
-            disposable = reactAgent.stream(goal, config).concatMap(this::classifyMessage)
+            disposable = reactAgent.stream(goal, runConfig).concatMap(this::classifyMessage)
                     .doOnNext(agentStream -> sink.tryEmitNext(agentStream))
                     .doOnComplete(() -> {
                         sink.tryEmitComplete();
                         synchronized (this) {
                             runningTask = null;
-                            status = Status.FREE;
+                            // 审批中断时保留 INTERRUPTED 状态，等待 handleAgentInterrupt 恢复
+                            if (status != Status.INTERRUPTED) {
+                                status = Status.FREE;
+                            }
                         }
                     })
                     .doOnError(error -> {
                         sink.tryEmitError(error);
                         synchronized (this) {
                             runningTask = null;
-                            status = Status.FREE;
+                            if (status != Status.INTERRUPTED) {
+                                status = Status.FREE;
+                            }
                         }
                     })
                     .subscribe();
@@ -203,33 +244,86 @@ public class AgentSession {
                 throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "恢复中断失败, 因为当前会话没有在被中断");
             }
         }
-        InterruptionMetadata.Builder handledInterruption = (InterruptionMetadata.Builder) config.context().get("__HANDLES_INTERRUPTED__");
+        Object raw = config.context().get("__HANDLES_INTERRUPTED__");
+        if (!(raw instanceof InterruptionMetadata.Builder handledInterruption)) {
+            throw new IllegalStateException("会话: " + this.agentContext.getRunId() + "没有待处理的审批上下文");
+        }
+
         for (AgentInterruptHandle handle : handles) {
-            // 简单的先构建成 fb
+            InterruptionMetadata.ToolFeedback original = findFeedback(handle.getId());
+            String originalArguments = original == null ? handle.getArguments() : original.getArguments();
+
             InterruptionMetadata.ToolFeedback.Builder fbBuilder = InterruptionMetadata.ToolFeedback.builder()
                     .name(handle.getName())
                     .id(handle.getId())
-                    .description(handle.getDescription())
-                    .arguments(handle.getArguments());
+                    .description(handle.getDescription() != null ? handle.getDescription() : (original == null ? null : original.getDescription()))
+                    .arguments(resolveArguments(handle, originalArguments));
 
-            switch (handle.getDecision()){
-                case APPROVED -> {
-                    fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
-                }
+            switch (handle.getDecision()) {
+                case APPROVED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
                 case APPROVE_ALL -> {
-                    // TODO
+                    fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
+                    rememberApproval(handle, originalArguments);
                 }
-                default -> {
-                    fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
-                }
+                case EDITED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.EDITED);
+                default -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
             }
 
-           handledInterruption.addToolFeedback(fbBuilder.build());
+            handledInterruption.addToolFeedback(fbBuilder.build());
         }
+
         InterruptionMetadata data = handledInterruption.build();
-        RunnableConfig newConfig = RunnableConfig.builder().threadId(agentContext.getRunId()).addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data).build();
-        this.config = newConfig;
-        return run("");
+        RunnableConfig newConfig = RunnableConfig.builder()
+                .threadId(agentContext.getRunId())
+                .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data)
+                .build();
+        config.context().remove("__HANDLES_INTERRUPTED__");
+        this.pendingInterruption = null;
+        // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
+        shellTool2.getSessionManager().initialize(newConfig);
+        return run("", newConfig);
+    }
+
+    /**
+     * 从 pendingInterruption 中按 toolCallId 找到原始反馈
+     */
+    private InterruptionMetadata.ToolFeedback findFeedback(String toolCallId) {
+        if (pendingInterruption == null || toolCallId == null) {
+            return null;
+        }
+        return pendingInterruption.toolFeedbacks().stream()
+                .filter(f -> toolCallId.equals(f.getId()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /**
+     * EDITED 使用前端传回的新参数，其他情况沿用原始参数
+     */
+    private String resolveArguments(AgentInterruptHandle handle, String originalArguments) {
+        if (handle.getDecision() == AgentInterruptHandle.Decision.EDITED
+                && handle.getArguments() != null
+                && !handle.getArguments().isBlank()) {
+            return handle.getArguments();
+        }
+        return originalArguments;
+    }
+
+    /**
+     * APPROVE_ALL：当前会话放行该命令，后续相同命令不再审批
+     */
+    private void rememberApproval(AgentInterruptHandle handle, String originalArguments) {
+        if (handle.getName() == null || !handle.getName().equalsIgnoreCase("shell")) {
+            return;
+        }
+        try {
+            String command = extractShellCommand(originalArguments);
+            if (command != null && !command.isBlank()) {
+                approveCommandForSession(command);
+            }
+        } catch (Exception ignored) {
+            // 参数解析失败时不缓存，避免错误放行
+        }
     }
 
 
@@ -371,8 +465,42 @@ public class AgentSession {
             }
         }
         config.context().put("__HANDLES_INTERRUPTED__", handledInterruption);
-        // TODO 审批/自动放行逻辑尚未接入 WebSocket，先不向调用方输出额外事件
-        return Flux.empty();
+        pendingInterruption = metadata;
+
+        // 有需要人工审批的工具时，发送 permission.requested 给前端并中断当前流
+        if (!waitForHandles.isEmpty()) {
+            return Flux.just(new AgentStream(
+                    AgentStream.Status.PERMISSION_REQUESTED,
+                    toPermissionJson(waitForHandles)
+            ));
+        }
+
+        // 全部自动放行（安全命令/会话缓存命中）：不打扰用户，直接恢复执行
+        // 延迟到当前流完成后再启动恢复流，避免在 concatMap 处理中重入 run()
+        return Flux.defer(() ->
+                Mono.delay(java.time.Duration.ofMillis(1))
+                        .flatMapMany(ignore -> handleAgentInterrupt(new AgentInterruptHandle[0]))
+        );
+    }
+
+    /**
+     * 将待审批的工具反馈列表序列化为前端可读的 JSON
+     */
+    private String toPermissionJson(List<InterruptionMetadata.ToolFeedback> feedbacks) {
+        List<Map<String, String>> items = new ArrayList<>();
+        for (InterruptionMetadata.ToolFeedback feedback : feedbacks) {
+            Map<String, String> item = new HashMap<>();
+            item.put("toolCallId", feedback.getId());
+            item.put("toolName", feedback.getName());
+            item.put("arguments", feedback.getArguments());
+            item.put("description", feedback.getDescription());
+            items.add(item);
+        }
+        try {
+            return objectMapper.writeValueAsString(items);
+        } catch (JsonProcessingException e) {
+            return "[]";
+        }
     }
 
 
