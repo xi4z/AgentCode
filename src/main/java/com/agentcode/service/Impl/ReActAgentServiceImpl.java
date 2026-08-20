@@ -1,6 +1,6 @@
 package com.agentcode.service.Impl;
 
-import com.agentcode.agent.AgentHandleInterrupt;
+import com.agentcode.agent.AgentInterruptHandle;
 import com.agentcode.agent.AgentSession;
 import com.agentcode.agent.AgentStream;
 import com.agentcode.context.AgentContext;
@@ -60,7 +60,7 @@ public class ReActAgentServiceImpl implements ReactAgentService {
     }
 
     @Override
-    public void handleInterrupt(AgentHandleInterrupt handle) {
+    public void handleInterrupt(AgentInterruptHandle handle) {
         // TODO 需要根据传参来确定如何进行
     }
 

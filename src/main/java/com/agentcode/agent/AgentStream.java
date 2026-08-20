@@ -1,5 +1,10 @@
 package com.agentcode.agent;
 
+/**
+ * 处理流式输出的类
+ * @param status
+ * @param content
+ */
 public record AgentStream(
         Status status,
         String content

@@ -1,6 +1,6 @@
 package com.agentcode.agent;
 
-import com.agentcode.common.ShellHelper;
+import com.agentcode.common.ShellParseHelper;
 import com.agentcode.context.AgentContext;
 import com.agentcode.exception.AgentAlreadyRunningException;
 import com.agentcode.exception.InterruptFailException;
@@ -8,15 +8,12 @@ import com.agentcode.exception.StopFailException;
 import com.agentcode.exception.TaskNotFoundException;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
-import com.alibaba.cloud.ai.graph.action.Command;
 import com.alibaba.cloud.ai.graph.action.InterruptionMetadata;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemTools;
-import com.alibaba.cloud.ai.graph.agent.hook.InterruptionHook;
 import com.alibaba.cloud.ai.graph.agent.hook.shelltool.ShellToolAgentHook;
 import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
-import com.alibaba.cloud.ai.graph.agent.tools.ShellTool;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
@@ -26,7 +23,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import lombok.Data;
-import okio.Sink;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -39,10 +35,13 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Pattern;
+
+import static com.agentcode.common.ShellParseHelper.*;
 
 public class AgentSession {
 
@@ -58,6 +57,7 @@ public class AgentSession {
 
     public AgentSession(AgentContext agentContext, ChatModel chatModel, BaseCheckpointSaver saver) {
         this.agentContext = agentContext;
+        this.saver = saver;
         String workspace = resolveWorkspace(agentContext);
         this.reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
@@ -90,9 +90,10 @@ public class AgentSession {
     }
     private volatile Status status = Status.FREE; // 会话状态
 
+    final BaseCheckpointSaver saver;
     final AgentContext agentContext;
     final ReactAgent reactAgent;
-    final RunnableConfig config;
+    RunnableConfig config;
 
     @AllArgsConstructor
     @Data
@@ -109,7 +110,7 @@ public class AgentSession {
     public Flux<AgentStream> run(String goal){
         Sinks.Many<AgentStream> sink;
         synchronized (this) {
-            if (status != Status.FREE) {
+            if (status == Status.RUNNING) {
                 // 此时不允许run
                 throw new AgentAlreadyRunningException("会话:" + agentContext.getRunId() + "正在运行");
             }
@@ -118,7 +119,6 @@ public class AgentSession {
                     .unicast()
                     .onBackpressureBuffer();
         }
-
         Disposable disposable;
         try {
             // 2. 启动内部 Agent，把事件转发到 sink
@@ -196,6 +196,36 @@ public class AgentSession {
         }
         reactAgent.interrupt(message, config);
     }
+
+    public Flux<AgentStream> handleAgentInterrupt(AgentInterruptHandle[] handles) {
+        synchronized (this) {
+            if (status != Status.INTERRUPTED) {
+                throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "恢复中断失败, 因为当前会话没有在被中断");
+            }
+        }
+        InterruptionMetadata.Builder handledInterruption = (InterruptionMetadata.Builder) config.context().get("__HANDLES_INTERRUPTED__");
+        for (AgentInterruptHandle handle : handles) {
+            // 简单的先构建成 fb
+            InterruptionMetadata.ToolFeedback.Builder fbBuilder = InterruptionMetadata.ToolFeedback.builder()
+                    .name(handle.getName())
+                    .id(handle.getId())
+                    .description(handle.getDescription())
+                    .arguments(handle.getArguments());
+
+            if (Objects.requireNonNull(handle.getDecision()) == AgentInterruptHandle.Decision.APPROVED) {
+                fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
+            } else {
+                fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
+            }
+
+           handledInterruption.addToolFeedback(fbBuilder.build());
+        }
+        InterruptionMetadata data = handledInterruption.build();
+        RunnableConfig newConfig = RunnableConfig.builder().threadId(agentContext.getRunId()).addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data).build();
+        this.config = newConfig;
+        return run("");
+    }
+
 
     private String resolveWorkspace(AgentContext agentContext) {
         String workspace = agentContext.getWorkspace();
@@ -300,12 +330,22 @@ public class AgentSession {
     private Flux<AgentStream> preHandleAgentInterrupt(InterruptionMetadata metadata) {
         // 先检查工具类型, 如果是 shell 先拆分指令然后走 shell 处理路线
         List<InterruptionMetadata.ToolFeedback> toolFeedbacks = metadata.toolFeedbacks();
+        // 已经被处理的 interruption
+        InterruptionMetadata.Builder handledInterruption = InterruptionMetadata.builder()
+                .nodeId(metadata.node())
+                .state(metadata.state());
+        List<InterruptionMetadata.ToolFeedback> waitForHandles = new ArrayList<>();
         for (InterruptionMetadata.ToolFeedback feedback : toolFeedbacks) {
             // 当前只拦截 write_file, edit 与 shell
+            InterruptionMetadata.ToolFeedback.Builder currFeedback =
+                    InterruptionMetadata.ToolFeedback.builder(feedback); // 先预处理
+
+
             if (!feedback.getName().equalsIgnoreCase("shell")){
                 // 此时检查工作目录即可
                 if (checkPathValid(feedback.getArguments())) {
                     // TODO 路径合法时按后续审批策略决定自动放行或继续询问
+                    currFeedback.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
                 }
             } else {
                 // 检查 shell, 需要对可能的多重指令进行拆分并尝试进行模式匹配
@@ -313,28 +353,25 @@ public class AgentSession {
                 // 静态评估通过，或当前会话已经放行过这条命令/这类命令，则无需再人工审批
                 if (checkCommandValid(command) || isSessionApproved(command)) {
                     // TODO 自动放行/恢复执行
-                } else {
-                    // TODO 发送 WebSocket 审批请求；用户选择 APPROVE_ALL 时调用
-                    //      approveCommandForSession(command) / approvePatternForSession(pattern)
+                    currFeedback.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
                 }
+//                else {
+//                    // TODO 发送 WebSocket 审批请求；用户选择 APPROVE_ALL 时调用
+//                    //      approveCommandForSession(command) / approvePatternForSession(pattern)
+//                }
+            }
+            InterruptionMetadata.ToolFeedback fb = currFeedback.build();
+            if (fb.getResult() == null){
+                waitForHandles.add(fb);
+            }else {
+                handledInterruption.addToolFeedback(fb); // 否则就增加到已就绪的 fb 中
             }
         }
+        config.context().put("__HANDLES_INTERRUPTED__", handledInterruption);
         // TODO 审批/自动放行逻辑尚未接入 WebSocket，先不向调用方输出额外事件
         return Flux.empty();
     }
 
-    /**
-     * 从工具参数 JSON 中解析出 shell command
-     */
-    private String extractShellCommand(String arguments) {
-        try {
-            ObjectMapper mapper = new ObjectMapper();
-            JsonNode root = mapper.readTree(arguments);
-            return root.path("command").asText();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
 
     /**
      * 检查 Shell 参数：解析 command 后交给静态评估
@@ -377,19 +414,19 @@ public class AgentSession {
             return false;
         }
 
-        List<String> tokens = ShellHelper.splitCommand(segment);
+        List<String> tokens = ShellParseHelper.splitCommand(segment);
         if (tokens.isEmpty()) {
             return false;
         }
         String commandName = tokens.get(0);
 
         // deny_patterns：危险命令黑名单，命中不允许自动放行
-        if (ShellHelper.DANGEROUS_COMMANDS.contains(commandName)) {
+        if (ShellParseHelper.DANGEROUS_COMMANDS.contains(commandName)) {
             return false;
         }
 
         // allow_patterns：安全命令名单，命中自动放行
-        if (ShellHelper.safeCommands.contains(commandName)) {
+        if (ShellParseHelper.safeCommands.contains(commandName)) {
             return true;
         }
 
@@ -397,40 +434,7 @@ public class AgentSession {
         return false;
     }
 
-    /**
-     * 将命令按 shell 运算符拆成多个子命令片段
-     */
-    private List<String> splitShellSegments(String command) {
-        List<String> tokens = ShellHelper.splitCommand(command);
-        List<String> segments = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
 
-        for (String token : tokens) {
-            if (isShellOperator(token)) {
-                if (!current.isEmpty()) {
-                    segments.add(current.toString());
-                    current.setLength(0);
-                }
-            } else {
-                if (!current.isEmpty()) {
-                    current.append(' ');
-                }
-                current.append(token);
-            }
-        }
-        if (!current.isEmpty()) {
-            segments.add(current.toString());
-        }
-        return segments;
-    }
-
-    /**
-     * 判断 token 是否为 shell 运算符
-     */
-    private boolean isShellOperator(String token) {
-        return token.equals("&&") || token.equals("||")
-                || token.equals("|") || token.equals(";");
-    }
 
     /**
      * 判断命令是否命中 outside-cwd 启发式规则
@@ -483,21 +487,11 @@ public class AgentSession {
         sessionApprovedPatterns.add(compileShellWildcard(pattern.trim()));
     }
 
-    /**
-     * 将 shell 通配符转成正则表达式
-     */
-    private Pattern compileShellWildcard(String pattern) {
-        String regex = pattern
-                .replace(".", "\\.")
-                .replace("*", ".*")
-                .replace("?", ".");
-        return Pattern.compile(regex);
-    }
+
 
     private boolean checkPathValid(String path) {
-        // TODO 传过来的参数应该是json化的,需要提取出目录
         ObjectMapper mapper = new ObjectMapper();
-        String filePath = "";
+        String filePath;
         try {
             JsonNode root = mapper.readTree(path);
             filePath = root.path("filepath").asText();

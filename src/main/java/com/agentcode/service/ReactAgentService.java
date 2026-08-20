@@ -1,6 +1,6 @@
 package com.agentcode.service;
 
-import com.agentcode.agent.AgentHandleInterrupt;
+import com.agentcode.agent.AgentInterruptHandle;
 import com.agentcode.agent.AgentStream;
 import reactor.core.publisher.Flux;
 
@@ -24,7 +24,7 @@ public interface ReactAgentService {
      * 处理 Agent 因为权限审批而造成的中断
      * @param handle
      */
-    void handleInterrupt(AgentHandleInterrupt handle);
+    void handleInterrupt(AgentInterruptHandle handle);
 
     /**
      * 对正在进行中的 Agent 行动做出引导, 此时 Status 必须为 Running

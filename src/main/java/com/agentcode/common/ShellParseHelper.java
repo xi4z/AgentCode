@@ -1,14 +1,18 @@
 package com.agentcode.common;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Shell 工具
  */
-public final class ShellHelper {
+public final class ShellParseHelper {
     public static final Set<String> safeCommands = new HashSet<String>(
             List.of(
                     "pwd",
@@ -115,5 +119,64 @@ public final class ShellHelper {
         }
 
         return tokens;
+    }
+
+    /**
+     * 从工具参数 JSON 中解析出 shell command
+     */
+    public static String extractShellCommand(String arguments) {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode root = mapper.readTree(arguments);
+            return root.path("command").asText();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * 将 shell 通配符转成正则表达式
+     */
+    public static Pattern compileShellWildcard(String pattern) {
+        String regex = pattern
+                .replace(".", "\\.")
+                .replace("*", ".*")
+                .replace("?", ".");
+        return Pattern.compile(regex);
+    }
+
+    /**
+     * 将命令按 shell 运算符拆成多个子命令片段
+     */
+    public static List<String> splitShellSegments(String command) {
+        List<String> tokens = ShellParseHelper.splitCommand(command);
+        List<String> segments = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+
+        for (String token : tokens) {
+            if (isShellOperator(token)) {
+                if (!current.isEmpty()) {
+                    segments.add(current.toString());
+                    current.setLength(0);
+                }
+            } else {
+                if (!current.isEmpty()) {
+                    current.append(' ');
+                }
+                current.append(token);
+            }
+        }
+        if (!current.isEmpty()) {
+            segments.add(current.toString());
+        }
+        return segments;
+    }
+
+    /**
+     * 判断 token 是否为 shell 运算符
+     */
+    public static boolean isShellOperator(String token) {
+        return token.equals("&&") || token.equals("||")
+                || token.equals("|") || token.equals(";");
     }
 }
