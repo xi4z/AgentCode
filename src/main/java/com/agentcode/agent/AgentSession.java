@@ -212,10 +212,16 @@ public class AgentSession {
                     .description(handle.getDescription())
                     .arguments(handle.getArguments());
 
-            if (Objects.requireNonNull(handle.getDecision()) == AgentInterruptHandle.Decision.APPROVED) {
-                fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
-            } else {
-                fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
+            switch (handle.getDecision()){
+                case APPROVED -> {
+                    fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
+                }
+                case APPROVE_ALL -> {
+                    // TODO
+                }
+                default -> {
+                    fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
+                }
             }
 
            handledInterruption.addToolFeedback(fbBuilder.build());
@@ -246,10 +252,6 @@ public class AgentSession {
         OutputType type = sop.getOutputType();
         Message message = sop.message();
         AgentStream agentStream = null;
-        // 如果当前是工具审批中断:
-
-
-
 
         // 处理流式输出
         if (message instanceof AssistantMessage assistantMessage){
