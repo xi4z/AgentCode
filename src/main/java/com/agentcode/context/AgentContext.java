@@ -1,9 +1,6 @@
 package com.agentcode.context;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.RequiredArgsConstructor;
+import lombok.*;
 
 @Data
 @Builder
@@ -17,7 +14,7 @@ public class AgentContext {
 
     final String runId;
     String goal;
-    String workspace;
+    final String workspace;
 
     String sessionNotes; // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
 
@@ -31,6 +28,9 @@ public class AgentContext {
      * @param workspace
      */
     private String parseProjectContext(String workspace) {
+        // TODO 从Properties 中拉取Glob system project 各自的提示词来组装
+
+        // TODO 将当前对象的 sessionNotes 拉下来组装
         return new String(workspace);
     }
 }

@@ -15,11 +15,14 @@ import com.alibaba.cloud.ai.graph.agent.hook.Hook;
 import com.alibaba.cloud.ai.graph.agent.hook.hip.HumanInTheLoopHook;
 import com.alibaba.cloud.ai.graph.agent.hook.hip.ToolConfig;
 import com.alibaba.cloud.ai.graph.agent.hook.shelltool.ShellToolAgentHook;
+import com.alibaba.cloud.ai.graph.agent.hook.skills.SkillsAgentHook;
 import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
+import com.alibaba.cloud.ai.graph.skills.registry.SkillRegistry;
+import com.alibaba.cloud.ai.graph.skills.registry.filesystem.FileSystemSkillRegistry;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -46,7 +49,9 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Function;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import static com.agentcode.common.ShellParseHelper.*;
 
@@ -91,6 +96,15 @@ public class AgentSession {
             hooks.add(hitlBuilder.build());
         }
 
+        // 组装 SKill 加载器
+        SkillRegistry registry = FileSystemSkillRegistry.builder()
+                .projectSkillsDirectory(workspace+ "/skills")
+                .build();
+
+        SkillsAgentHook skillsHook = SkillsAgentHook.builder()
+                .skillRegistry(registry)
+                .build();
+
         this.reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
                 .model(chatModel)
@@ -102,6 +116,7 @@ public class AgentSession {
                 .methodTools(FileSystemTools.builder()
                         .rootDir(workspace).maxFileSizeMb(10).build())
                 .hooks(hooks)
+                .hooks(skillsHook)
                 .build();
 
         // 在重新 run 之后, 修改 context 状态
@@ -125,7 +140,6 @@ public class AgentSession {
     RunnableConfig config;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private volatile InterruptionMetadata pendingInterruption;
 
     @AllArgsConstructor
     @Data
@@ -248,9 +262,9 @@ public class AgentSession {
         if (!(raw instanceof InterruptionMetadata.Builder handledInterruption)) {
             throw new IllegalStateException("会话: " + this.agentContext.getRunId() + "没有待处理的审批上下文");
         }
-
+        Map<String, InterruptionMetadata.ToolFeedback> pendingInterrupted = (Map<String, InterruptionMetadata.ToolFeedback>) config.context().get("__PENDING_INTERRUPTED");
         for (AgentInterruptHandle handle : handles) {
-            InterruptionMetadata.ToolFeedback original = findFeedback(handle.getId());
+            InterruptionMetadata.ToolFeedback original = pendingInterrupted.get(handle.getId());
             String originalArguments = original == null ? handle.getArguments() : original.getArguments();
 
             InterruptionMetadata.ToolFeedback.Builder fbBuilder = InterruptionMetadata.ToolFeedback.builder()
@@ -278,24 +292,13 @@ public class AgentSession {
                 .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data)
                 .build();
         config.context().remove("__HANDLES_INTERRUPTED__");
-        this.pendingInterruption = null;
+        config.context().remove("__PENDING_INTERRUPTED");
         // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
         shellTool2.getSessionManager().initialize(newConfig);
         return run("", newConfig);
     }
 
-    /**
-     * 从 pendingInterruption 中按 toolCallId 找到原始反馈
-     */
-    private InterruptionMetadata.ToolFeedback findFeedback(String toolCallId) {
-        if (pendingInterruption == null || toolCallId == null) {
-            return null;
-        }
-        return pendingInterruption.toolFeedbacks().stream()
-                .filter(f -> toolCallId.equals(f.getId()))
-                .findFirst()
-                .orElse(null);
-    }
+
 
     /**
      * EDITED 使用前端传回的新参数，其他情况沿用原始参数
@@ -436,12 +439,9 @@ public class AgentSession {
             // 当前只拦截 write_file, edit 与 shell
             InterruptionMetadata.ToolFeedback.Builder currFeedback =
                     InterruptionMetadata.ToolFeedback.builder(feedback); // 先预处理
-
-
             if (!feedback.getName().equalsIgnoreCase("shell")){
                 // 此时检查工作目录即可
                 if (checkPathValid(feedback.getArguments())) {
-                    // TODO 路径合法时按后续审批策略决定自动放行或继续询问
                     currFeedback.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
                 }
             } else {
@@ -449,13 +449,8 @@ public class AgentSession {
                 String command = extractShellCommand(feedback.getArguments());
                 // 静态评估通过，或当前会话已经放行过这条命令/这类命令，则无需再人工审批
                 if (checkCommandValid(command) || isSessionApproved(command)) {
-                    // TODO 自动放行/恢复执行
                     currFeedback.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
                 }
-//                else {
-//                    // TODO 发送 WebSocket 审批请求；用户选择 APPROVE_ALL 时调用
-//                    //      approveCommandForSession(command) / approvePatternForSession(pattern)
-//                }
             }
             InterruptionMetadata.ToolFeedback fb = currFeedback.build();
             if (fb.getResult() == null){
@@ -465,7 +460,8 @@ public class AgentSession {
             }
         }
         config.context().put("__HANDLES_INTERRUPTED__", handledInterruption);
-        pendingInterruption = metadata;
+        // 拿到需要处理审批的请求原始数据, 并以 id 做键区分
+        config.context().put("__PENDING_INTERRUPTED__", waitForHandles.stream().collect(Collectors.toMap(InterruptionMetadata.ToolFeedback::getId, Function.identity())));
 
         // 有需要人工审批的工具时，发送 permission.requested 给前端并中断当前流
         if (!waitForHandles.isEmpty()) {

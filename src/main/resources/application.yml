@@ -40,53 +40,8 @@ agentcode:
   agent:
     max-steps: ${AGENT_MAX_STEPS:20}
     system-prompt: ${AGENT_SYSTEM_PROMPT:You are a helpful AI assistant. Use the available tools to complete the user's goal. When the goal is fully achieved, respond with a final answer and do not call any more tools.}
-    global-context-file: ${AGENT_GLOBAL_CONTEXT_FILE:~/.kama/context.md}
-    project-context-file: ${AGENT_PROJECT_CONTEXT_FILE:.kama/context.md}
-
-  llm:
-    default-model: ${AGENT_LLM_DEFAULT_MODEL:qwen-max}
-
-  tool:
-    timeout-seconds: ${TOOL_TIMEOUT_SECONDS:120}
-    max-output-bytes: ${TOOL_MAX_OUTPUT_BYTES:65536}
-    whitelist: ${TOOL_WHITELIST:}
-    # 示例：TOOL_WHITELIST=read_file,list_dir
-
-  permission:
-    # ask / auto / never
-    mode: ${PERMISSION_MODE:never}
-    default-action: ${PERMISSION_DEFAULT_ACTION:deny}
-    policy-file: ${PERMISSION_POLICY_FILE:~/.kama/policy.toml}
-    timeout-seconds: ${PERMISSION_TIMEOUT_SECONDS:60}
-
-  session:
-    root-dir: ${SESSION_ROOT_DIR:~/.kama/sessions}
-    one-shot-mode: ${SESSION_ONE_SHOT_MODE:true}
-    chat-mode: ${SESSION_CHAT_MODE:false}
-
-  compaction:
-    auto-threshold: ${COMPACTION_AUTO_THRESHOLD:0.8}
-    tool-result-limit: ${COMPACTION_TOOL_RESULT_LIMIT:8000}
-    tool-result-keep: ${COMPACTION_TOOL_RESULT_KEEP:4000}
-
-  event:
-    enabled: ${EVENT_ENABLED:true}
-    file: ${EVENT_FILE:~/.kama/events.jsonl}
-
-  transport:
-    host: ${KAMA_HOST:127.0.0.1}
-    port: ${KAMA_PORT:7437}
-    protocol: ${KAMA_PROTOCOL:json-rpc-ndjson}
-
-  trace:
-    enabled: ${TRACE_ENABLED:true}
-    file: ${TRACE_FILE:~/.kama/traces/daemon.jsonl}
-    include-llm-payload: ${TRACE_INCLUDE_LLM_PAYLOAD:true}
-
-  mcp:
-    # MCP server 列表建议通过代码配置或配置类注入。
-    # 如需从环境变量读取，可使用 SPRING_AI_MCP_CLIENT_* 或自行解析 JSON 环境变量。
-    servers: ${MCP_SERVERS:[]}
+    global-context-file: ${AGENT_GLOBAL_CONTEXT_FILE:~/.agent/context.md}
+    project-context-file: ${AGENT_PROJECT_CONTEXT_FILE:.agent/context.md}
 
 # 若需要配置 Spring AI 原生 MCP client，可参考：
 # spring:

@@ -7,6 +7,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @Data
 public class AgentCodeProperties {
 
+
     String systemPrompt;
     int maxStep;
 
