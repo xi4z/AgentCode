@@ -164,6 +164,8 @@ let ws = null;
 let runId = null;
 let busy = false;
 let permissions = new Map();
+let streamBlock = null;
+let streamKind = null;
 
 const log = document.getElementById('log');
 const runBadge = document.getElementById('runBadge');
@@ -182,6 +184,11 @@ function appendMessage(kind, text) {
     log.appendChild(div);
     log.scrollTop = log.scrollHeight;
     return div;
+}
+
+function finalizeStream() {
+    streamBlock = null;
+    streamKind = null;
 }
 
 function setBusy(value) {
@@ -231,26 +238,31 @@ function handleServerMessage(msg) {
             break;
 
         case 'permission_requested':
+            finalizeStream();
             permissions.set(msg.toolCallId, msg);
             appendPermissionRequest(msg);
             break;
 
         case 'done':
+            finalizeStream();
             setBusy(false);
             appendMessage('system', '本轮完成');
             break;
 
         case 'error':
+            finalizeStream();
             setBusy(false);
             appendMessage('system', '错误: ' + msg.message);
             break;
 
         case 'stopped':
+            finalizeStream();
             setBusy(false);
             appendMessage('system', '已停止');
             break;
 
         case 'interrupted':
+            finalizeStream();
             setBusy(false);
             appendMessage('system', '已中断: ' + msg.message);
             break;
@@ -268,12 +280,33 @@ function appendAgentEvent(status, content) {
         appendMessage('tool', '[工具执行完成]');
         return;
     }
-    if (status === 'THINKING_STREAMING') {
-        appendMessage('assistant', content);
+    if (status === 'THINKING_STREAMING' || status === 'RESPONSE_STREAMING') {
+        const kind = status === 'THINKING_STREAMING' ? 'thinking' : 'response';
+        if (streamBlock && streamKind === kind) {
+            streamBlock.textContent += content || '';
+        } else {
+            streamBlock = appendMessage('assistant', content || '');
+            streamKind = kind;
+        }
+        log.scrollTop = log.scrollHeight;
         return;
     }
-    if (status === 'RESPONSE_STREAMING') {
-        appendMessage('assistant', content);
+    if (status === 'THINKING_FINISHED') {
+        if (streamBlock && streamKind === 'thinking') {
+            if (content) streamBlock.textContent = content;
+        } else {
+            appendMessage('assistant', content || '');
+        }
+        finalizeStream();
+        return;
+    }
+    if (status === 'RESPONSE_FINISHED') {
+        if (streamBlock && streamKind === 'response') {
+            if (content) streamBlock.textContent = content;
+        } else {
+            appendMessage('assistant', content || '');
+        }
+        finalizeStream();
         return;
     }
     if (status === 'TOOL_STREAMING') {

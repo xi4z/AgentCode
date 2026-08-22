@@ -19,6 +19,7 @@ let ws;
 let runId = null;
 let busy = false;
 let turnResolve = null;
+let streamKind = null;
 
 const rl = readline.createInterface({
     input: process.stdin,
@@ -32,6 +33,17 @@ function ask(question) {
 
 function log(message) {
     process.stdout.write(message + '\n');
+}
+
+function streamPrefix(kind) {
+    return kind === 'thinking' ? '  💭 ' : '  🤖 ';
+}
+
+function finishStreamLine() {
+    if (streamKind) {
+        process.stdout.write('\n');
+        streamKind = null;
+    }
 }
 
 function send(obj) {
@@ -131,28 +143,33 @@ async function handleMessage(msg) {
             break;
 
         case 'permission_requested':
+            finishStreamLine();
             await handlePermission(msg);
             break;
 
         case 'done':
+            finishStreamLine();
             log('✅ 本轮完成\n');
             busy = false;
             finishTurn();
             break;
 
         case 'error':
+            finishStreamLine();
             log('❌ 错误: ' + msg.message);
             busy = false;
             finishTurn();
             break;
 
         case 'stopped':
+            finishStreamLine();
             log('⏹ 已停止');
             busy = false;
             finishTurn();
             break;
 
         case 'interrupted':
+            finishStreamLine();
             log('⏸ 已中断: ' + (msg.message || ''));
             busy = false;
             finishTurn();
@@ -166,14 +183,35 @@ async function handleMessage(msg) {
 function printAgentEvent(status, content) {
     if (status === 'PERMISSION_REQUESTED') return;
     if (status === 'TOOL_FINISHED') {
+        finishStreamLine();
         log('  🔧 [工具执行完成]');
     } else if (status === 'TOOL_STREAMING') {
+        finishStreamLine();
         log('  🔧 调用工具: ' + (content || ''));
-    } else if (status === 'THINKING_STREAMING') {
-        log('  💭 ' + (content || ''));
-    } else if (status === 'RESPONSE_STREAMING') {
-        log('  🤖 ' + (content || ''));
+    } else if (status === 'THINKING_STREAMING' || status === 'RESPONSE_STREAMING') {
+        const kind = status === 'THINKING_STREAMING' ? 'thinking' : 'response';
+        if (streamKind !== kind) {
+            finishStreamLine();
+            streamKind = kind;
+            process.stdout.write(streamPrefix(kind));
+        }
+        process.stdout.write(content || '');
+    } else if (status === 'THINKING_FINISHED') {
+        if (streamKind === 'thinking') {
+            if (content) process.stdout.write(content);
+            finishStreamLine();
+        } else {
+            log('  💭 ' + (content || ''));
+        }
+    } else if (status === 'RESPONSE_FINISHED') {
+        if (streamKind === 'response') {
+            if (content) process.stdout.write(content);
+            finishStreamLine();
+        } else {
+            log('  🤖 ' + (content || ''));
+        }
     } else {
+        finishStreamLine();
         log('  ' + status + ': ' + (content || ''));
     }
 }
