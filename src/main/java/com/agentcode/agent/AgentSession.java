@@ -76,6 +76,7 @@ public class AgentSession {
         this.agentContext = agentContext;
         this.saver = saver;
         this.approvalTools = approvalTools == null ? List.of() : List.copyOf(approvalTools);
+        this.approvalManager = new AgentApprovalManager(agentContext);
         String workspace = resolveWorkspace(agentContext);
         this.shellTool2 = ShellTool2.builder(workspace).build();
 
@@ -137,6 +138,7 @@ public class AgentSession {
     final ReactAgent reactAgent;
     final List<String> approvalTools;
     final ShellTool2 shellTool2;
+    final AgentApprovalManager approvalManager;
     RunnableConfig config;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -173,7 +175,7 @@ public class AgentSession {
         try {
             // 2. 启动内部 Agent，把事件转发到 sink
             disposable = reactAgent.stream(goal, runConfig).concatMap(this::classifyMessage)
-                    .doOnNext(agentStream -> sink.tryEmitNext(agentStream))
+                    .doOnNext(sink::tryEmitNext)
                     .doOnComplete(() -> {
                         sink.tryEmitComplete();
                         synchronized (this) {
@@ -271,13 +273,13 @@ public class AgentSession {
                     .name(handle.getName())
                     .id(handle.getId())
                     .description(handle.getDescription() != null ? handle.getDescription() : (original == null ? null : original.getDescription()))
-                    .arguments(resolveArguments(handle, originalArguments));
+                    .arguments(approvalManager.resolveArguments(handle, originalArguments));
 
             switch (handle.getDecision()) {
                 case APPROVED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
                 case APPROVE_ALL -> {
                     fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
-                    rememberApproval(handle, originalArguments);
+                    approvalManager.rememberApproval(handle, originalArguments);
                 }
                 case EDITED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.EDITED);
                 default -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
@@ -297,38 +299,6 @@ public class AgentSession {
         shellTool2.getSessionManager().initialize(newConfig);
         return run("", newConfig);
     }
-
-
-
-    /**
-     * EDITED 使用前端传回的新参数，其他情况沿用原始参数
-     */
-    private String resolveArguments(AgentInterruptHandle handle, String originalArguments) {
-        if (handle.getDecision() == AgentInterruptHandle.Decision.EDITED
-                && handle.getArguments() != null
-                && !handle.getArguments().isBlank()) {
-            return handle.getArguments();
-        }
-        return originalArguments;
-    }
-
-    /**
-     * APPROVE_ALL：当前会话放行该命令，后续相同命令不再审批
-     */
-    private void rememberApproval(AgentInterruptHandle handle, String originalArguments) {
-        if (handle.getName() == null || !handle.getName().equalsIgnoreCase("shell")) {
-            return;
-        }
-        try {
-            String command = extractShellCommand(originalArguments);
-            if (command != null && !command.isBlank()) {
-                approveCommandForSession(command);
-            }
-        } catch (Exception ignored) {
-            // 参数解析失败时不缓存，避免错误放行
-        }
-    }
-
 
     private String resolveWorkspace(AgentContext agentContext) {
         String workspace = agentContext.getWorkspace();
@@ -421,10 +391,7 @@ public class AgentSession {
      * 3. 检查是否突破工作目录, 突破一律确认
      * 4. 走缓存, 如果缓存没有确认
      * 5. 工具的默认策略, 当然工具也有缓存
-     *
      * 应该使用 WebSocket 向用户发送 WebSocket 信息. 并等待接收
-     * @param metadata
-     * @return
      */
     private Flux<AgentStream> preHandleAgentInterrupt(InterruptionMetadata metadata) {
         status = Status.INTERRUPTED;
@@ -439,18 +406,26 @@ public class AgentSession {
             // 当前只拦截 write_file, edit 与 shell
             InterruptionMetadata.ToolFeedback.Builder currFeedback =
                     InterruptionMetadata.ToolFeedback.builder(feedback); // 先预处理
+
+
             if (!feedback.getName().equalsIgnoreCase("shell")){
                 // 此时检查工作目录即可
-                if (checkPathValid(feedback.getArguments())) {
+                if (approvalManager.checkPathValid(feedback.getArguments())) {
+                    // TODO 路径合法时按后续审批策略决定自动放行或继续询问
                     currFeedback.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
                 }
             } else {
                 // 检查 shell, 需要对可能的多重指令进行拆分并尝试进行模式匹配
                 String command = extractShellCommand(feedback.getArguments());
                 // 静态评估通过，或当前会话已经放行过这条命令/这类命令，则无需再人工审批
-                if (checkCommandValid(command) || isSessionApproved(command)) {
+                if (approvalManager.checkCommandValid(command) || approvalManager.isSessionApproved(command)) {
+                    // TODO 自动放行/恢复执行
                     currFeedback.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
                 }
+//                else {
+//                    // TODO 发送 WebSocket 审批请求；用户选择 APPROVE_ALL 时调用
+//                    //      approveCommandForSession(command) / approvePatternForSession(pattern)
+//                }
             }
             InterruptionMetadata.ToolFeedback fb = currFeedback.build();
             if (fb.getResult() == null){
@@ -467,7 +442,7 @@ public class AgentSession {
         if (!waitForHandles.isEmpty()) {
             return Flux.just(new AgentStream(
                     AgentStream.Status.PERMISSION_REQUESTED,
-                    toPermissionJson(waitForHandles)
+                    approvalManager.toPermissionJson(waitForHandles)
             ));
         }
 
@@ -579,63 +554,20 @@ public class AgentSession {
      * 判断命令是否已在当前会话中被批准（精确命令或通配符模式）
      */
     public boolean isSessionApproved(String command) {
-        if (command == null || command.isBlank()) {
-            return false;
-        }
-        String normalized = command.trim();
-        if (sessionApprovedCommands.contains(normalized)) {
-            return true;
-        }
-        for (Pattern pattern : sessionApprovedPatterns) {
-            if (pattern.matcher(normalized).matches()) {
-                return true;
-            }
-        }
-        return false;
+        return approvalManager.isSessionApproved(command);
     }
 
     /**
      * 记录当前会话放行一条具体命令
      */
     public void approveCommandForSession(String command) {
-        if (command == null || command.isBlank()) {
-            return;
-        }
-        sessionApprovedCommands.add(command.trim());
+        approvalManager.approveCommandForSession(command);
     }
 
     /**
      * 记录当前会话放行一类命令（shell 通配符，* 匹配任意串，? 匹配单个字符）
      */
     public void approvePatternForSession(String pattern) {
-        if (pattern == null || pattern.isBlank()) {
-            return;
-        }
-        sessionApprovedPatterns.add(compileShellWildcard(pattern.trim()));
-    }
-
-
-
-    private boolean checkPathValid(String path) {
-        ObjectMapper mapper = new ObjectMapper();
-        String filePath;
-        try {
-            JsonNode root = mapper.readTree(path);
-            filePath = root.path("filepath").asText();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-        if (filePath.isEmpty()){
-            return false;
-        }
-        Path basePath = Paths.get(agentContext.getWorkspace()).toAbsolutePath().normalize();
-        Path resolvedPath = basePath.resolve(filePath);
-        Path normalizedPath = resolvedPath.normalize();
-        return normalizedPath.startsWith(basePath);
-    }
-
-    private void buildApprovalRequest(String description){
-        // 组装请求并传送至 WebSocket
-
+        approvalManager.approvePatternForSession(pattern);
     }
 }
