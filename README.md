@@ -58,6 +58,43 @@ mvn test
 mvn spring-boot:run
 ```
 
+## 前端入口
+
+### 1. 浏览器 Web UI
+
+启动服务后访问：
+
+```text
+http://localhost:8080/
+```
+
+页面会通过 `/ws/chat` 建立 WebSocket 连接，支持：
+- 创建会话
+- 流式显示 Agent 事件
+- 多轮对话
+- 工具审批（批准 / 本会话全部批准 / 拒绝）
+- stop / interrupt
+
+### 2. 终端多轮对话客户端
+
+Java 项目根目录提供 Node 终端客户端（Node 22+，使用内置 WebSocket，无需额外依赖）：
+
+```bash
+node scripts/terminal-chat.mjs --ws ws://localhost:8080/ws/chat --workspace /tmp --goal "列出当前目录下的文件"
+```
+
+也可以不传 `--goal`，进入交互模式：
+
+```bash
+node scripts/terminal-chat.mjs --ws ws://localhost:8080/ws/chat
+```
+
+交互模式支持：
+- 输入任意文字作为多轮消息
+- `stop` 停止当前任务
+- `interrupt <guidance>` 引导中断
+- `exit` 退出
+
 
 
 
