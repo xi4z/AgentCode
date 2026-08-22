@@ -117,6 +117,28 @@
         color: #78350f;
         text-align: center;
     }
+    .msg.markdown { white-space: normal; word-break: normal; }
+    .msg.markdown p { margin: 4px 0; }
+    .msg.markdown h1, .msg.markdown h2, .msg.markdown h3,
+    .msg.markdown h4, .msg.markdown h5, .msg.markdown h6 { margin: 6px 0 4px; }
+    .msg.markdown ul, .msg.markdown ol { margin: 4px 0; padding-left: 22px; }
+    .msg.markdown pre {
+        background: #1f2937;
+        color: #f9fafb;
+        padding: 10px 12px;
+        border-radius: 8px;
+        overflow-x: auto;
+        margin: 6px 0;
+    }
+    .msg.markdown pre code { background: transparent; padding: 0; color: inherit; }
+    .msg.markdown code {
+        background: #eef2ff;
+        color: #3730a3;
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 13px;
+    }
+    .msg.markdown a { color: var(--primary); text-decoration: underline; }
     .permission-actions { display: flex; gap: 6px; margin-top: 8px; }
     footer {
         border-top: 1px solid var(--border);
@@ -166,6 +188,7 @@ let busy = false;
 let permissions = new Map();
 let streamBlock = null;
 let streamKind = null;
+let streamRaw = '';
 
 const log = document.getElementById('log');
 const runBadge = document.getElementById('runBadge');
@@ -175,11 +198,129 @@ const stopBtn = document.getElementById('stopBtn');
 const sendBtn = document.getElementById('sendBtn');
 const chatInput = document.getElementById('chatInput');
 
-function appendMessage(kind, text) {
+function escapeHtml(text) {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function renderInlineMarkdown(text) {
+    let html = escapeHtml(text);
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    return html;
+}
+
+function renderMarkdown(text) {
+    if (!text) return '';
+    const lines = text.split('\n');
+    let html = '';
+    let inCode = false;
+    let codeLang = '';
+    let codeBuf = [];
+    let listType = null;
+    let paragraph = [];
+
+    const flushParagraph = () => {
+        if (paragraph.length) {
+            html += '<p>' + renderInlineMarkdown(paragraph.join(' ')).replace(/\n/g, '<br>') + '</p>';
+            paragraph = [];
+        }
+    };
+    const flushList = () => {
+        if (listType) {
+            html += '</' + listType + '>';
+            listType = null;
+        }
+    };
+
+    for (const line of lines) {
+        if (line.trim().startsWith('```')) {
+            if (inCode) {
+                html += '<pre><code' + (codeLang ? ' class="language-' + escapeHtml(codeLang) + '"' : '') + '>'
+                    + escapeHtml(codeBuf.join('\n')) + '</code></pre>';
+                inCode = false;
+                codeLang = '';
+                codeBuf = [];
+            } else {
+                flushParagraph();
+                flushList();
+                inCode = true;
+                codeLang = line.trim().slice(3).trim();
+            }
+            continue;
+        }
+        if (inCode) {
+            codeBuf.push(line);
+            continue;
+        }
+
+        const heading = line.match(/^(#{1,6})\s+(.*)$/);
+        if (heading) {
+            flushParagraph();
+            flushList();
+            const level = heading[1].length;
+            html += '<h' + level + '>' + renderInlineMarkdown(heading[2]) + '</h' + level + '>';
+            continue;
+        }
+
+        const ul = line.match(/^\s*[-*]\s+(.*)$/);
+        if (ul) {
+            flushParagraph();
+            if (listType !== 'ul') {
+                flushList();
+                html += '<ul>';
+                listType = 'ul';
+            }
+            html += '<li>' + renderInlineMarkdown(ul[1]) + '</li>';
+            continue;
+        }
+
+        const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+        if (ol) {
+            flushParagraph();
+            if (listType !== 'ol') {
+                flushList();
+                html += '<ol>';
+                listType = 'ol';
+            }
+            html += '<li>' + renderInlineMarkdown(ol[1]) + '</li>';
+            continue;
+        }
+
+        if (line.trim() === '') {
+            flushParagraph();
+            flushList();
+            continue;
+        }
+
+        paragraph.push(line.trim());
+    }
+
+    if (inCode && codeBuf.length) {
+        html += '<pre><code>' + escapeHtml(codeBuf.join('\n')) + '</code></pre>';
+    }
+    flushParagraph();
+    flushList();
+    return html;
+}
+
+function appendMessage(kind, text, options) {
+    options = options || {};
     const div = document.createElement('div');
-    div.className = 'msg ' + kind;
+    div.className = 'msg ' + kind + (options.markdown ? ' markdown' : '');
     if (text !== undefined && text !== null) {
-        div.textContent = text;
+        if (options.markdown) {
+            div.innerHTML = renderMarkdown(text);
+        } else {
+            div.textContent = text;
+        }
     }
     log.appendChild(div);
     log.scrollTop = log.scrollHeight;
@@ -189,6 +330,7 @@ function appendMessage(kind, text) {
 function finalizeStream() {
     streamBlock = null;
     streamKind = null;
+    streamRaw = '';
 }
 
 function setBusy(value) {
@@ -283,9 +425,11 @@ function appendAgentEvent(status, content) {
     if (status === 'THINKING_STREAMING' || status === 'RESPONSE_STREAMING') {
         const kind = status === 'THINKING_STREAMING' ? 'thinking' : 'response';
         if (streamBlock && streamKind === kind) {
-            streamBlock.textContent += content || '';
+            streamRaw += content || '';
+            streamBlock.innerHTML = renderMarkdown(streamRaw);
         } else {
-            streamBlock = appendMessage('assistant', content || '');
+            streamRaw = content || '';
+            streamBlock = appendMessage('assistant', streamRaw, {markdown: true});
             streamKind = kind;
         }
         log.scrollTop = log.scrollHeight;
@@ -293,18 +437,24 @@ function appendAgentEvent(status, content) {
     }
     if (status === 'THINKING_FINISHED') {
         if (streamBlock && streamKind === 'thinking') {
-            if (content) streamBlock.textContent = content;
+            if (content) {
+                streamRaw = content;
+                streamBlock.innerHTML = renderMarkdown(content);
+            }
         } else {
-            appendMessage('assistant', content || '');
+            appendMessage('assistant', content || '', {markdown: true});
         }
         finalizeStream();
         return;
     }
     if (status === 'RESPONSE_FINISHED') {
         if (streamBlock && streamKind === 'response') {
-            if (content) streamBlock.textContent = content;
+            if (content) {
+                streamRaw = content;
+                streamBlock.innerHTML = renderMarkdown(content);
+            }
         } else {
-            appendMessage('assistant', content || '');
+            appendMessage('assistant', content || '', {markdown: true});
         }
         finalizeStream();
         return;
