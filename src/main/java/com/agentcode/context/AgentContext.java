@@ -2,6 +2,11 @@ package com.agentcode.context;
 
 import lombok.*;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.List;
+
 @Data
 @Builder
 public class AgentContext {
@@ -19,18 +24,52 @@ public class AgentContext {
     String sessionNotes; // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
 
     public String systemPrompt(String systemPrompt) {
-        StringBuilder sb = new StringBuilder("system");
+        StringBuilder sb = new StringBuilder(systemPrompt == null ? "" : systemPrompt);
+        String projectContext = parseProjectContext(workspace);
+        if (projectContext != null && !projectContext.isBlank()) {
+            sb.append("\n\n## Project Context\n").append(projectContext);
+        }
         return sb.toString();
     }
 
     /**
-     * TODO 解析项目的提示词
-     * @param workspace
+     * 解析项目的提示词：优先读取 workspace/.kama/context.md，
+     * 不存在时依次回退到 AGENT.md、CLAUDE.md、SOUL.md。
+     *
+     * @param workspace 项目工作目录
+     * @return 项目上下文内容；文件不存在或内容为空时返回空字符串
      */
     private String parseProjectContext(String workspace) {
-        // TODO 从Properties 中拉取Glob system project 各自的提示词来组装
+        if (workspace == null || workspace.isBlank()) {
+            return "";
+        }
+        Path basePath = Paths.get(workspace).toAbsolutePath().normalize();
 
-        // TODO 将当前对象的 sessionNotes 拉下来组装
-        return new String(workspace);
+        Path contextFile = basePath.resolve(".kama").resolve("context.md");
+        String content = readFileIfExists(contextFile);
+        if (!content.isBlank()) {
+            return content;
+        }
+
+        for (String fileName : List.of("AGENT.md", "CLAUDE.md", "SOUL.md")) {
+            content = readFileIfExists(basePath.resolve(fileName));
+            if (!content.isBlank()) {
+                return content;
+            }
+        }
+
+        return "";
+    }
+
+    private String readFileIfExists(Path path) {
+        if (path == null || !Files.exists(path)) {
+            return "";
+        }
+        try {
+            return Files.readString(path).strip();
+        } catch (Exception e) {
+            // 文件不可读时静默忽略，避免把 IO 错误带入 prompt
+            return "";
+        }
     }
 }

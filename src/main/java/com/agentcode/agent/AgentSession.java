@@ -177,7 +177,6 @@ public class AgentSession {
             disposable = reactAgent.stream(goal, runConfig).concatMap(this::classifyMessage)
                     .doOnNext(sink::tryEmitNext)
                     .doOnComplete(() -> {
-                        sink.tryEmitComplete();
                         synchronized (this) {
                             runningTask = null;
                             // 审批中断时保留 INTERRUPTED 状态，等待 handleAgentInterrupt 恢复
@@ -185,15 +184,16 @@ public class AgentSession {
                                 status = Status.FREE;
                             }
                         }
+                        sink.tryEmitComplete();
                     })
                     .doOnError(error -> {
-                        sink.tryEmitError(error);
                         synchronized (this) {
                             runningTask = null;
                             if (status != Status.INTERRUPTED) {
                                 status = Status.FREE;
                             }
                         }
+                        sink.tryEmitError(error);
                     })
                     .subscribe();
         } catch (GraphRunnerException e) {
