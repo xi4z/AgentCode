@@ -21,13 +21,17 @@ public class AgentContext {
     String goal;
     final String workspace;
 
-    String sessionNotes; // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
+    StringBuilder sessionNotes; // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
 
     public String systemPrompt(String systemPrompt) {
         StringBuilder sb = new StringBuilder(systemPrompt == null ? "" : systemPrompt);
         String projectContext = parseProjectContext(workspace);
         if (projectContext != null && !projectContext.isBlank()) {
             sb.append("\n\n## Project Context\n").append(projectContext);
+        }
+
+        if (sessionNotes != null && !sessionNotes.isEmpty()) {
+            sb.append("\n\n## Session Notes\n").append(sessionNotes);
         }
         return sb.toString();
     }

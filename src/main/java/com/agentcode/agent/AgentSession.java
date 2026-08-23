@@ -6,6 +6,7 @@ import com.agentcode.exception.AgentAlreadyRunningException;
 import com.agentcode.exception.InterruptFailException;
 import com.agentcode.exception.StopFailException;
 import com.agentcode.exception.TaskNotFoundException;
+import com.agentcode.tools.SessionNoteTools;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.action.InterruptionMetadata;
@@ -114,8 +115,10 @@ public class AgentSession {
                         GrepSearchTool.builder(workspace).build(),
                         GlobSearchTool.builder(workspace).build())
                 )
-                .methodTools(FileSystemTools.builder()
-                        .rootDir(workspace).maxFileSizeMb(10).build())
+                .methodTools(
+                        FileSystemTools.builder().rootDir(workspace).maxFileSizeMb(10).build(),
+                        new SessionNoteTools()
+                )
                 .hooks(hooks)
                 .hooks(skillsHook)
                 .build();
@@ -124,6 +127,7 @@ public class AgentSession {
         this.config = RunnableConfig.builder()
                 .threadId(agentContext.getRunId()) // 获取数据
                 .build();
+        config.context().put("__AGENT_CONTEXT__", agentContext);
     }
 
     public enum Status{
@@ -295,9 +299,11 @@ public class AgentSession {
                 .build();
         config.context().remove("__HANDLES_INTERRUPTED__");
         config.context().remove("__PENDING_INTERRUPTED");
+        config = newConfig;
+        config.context().put("__AGENT_CONTEXT__", agentContext);
         // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
         shellTool2.getSessionManager().initialize(newConfig);
-        return run("", newConfig);
+        return run("");
     }
 
     private String resolveWorkspace(AgentContext agentContext) {
