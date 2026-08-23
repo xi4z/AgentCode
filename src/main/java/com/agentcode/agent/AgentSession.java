@@ -31,6 +31,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import lombok.Data;
+import lombok.Getter;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -135,7 +136,9 @@ public class AgentSession {
         RUNNING, // 当前会话正在运行
         INTERRUPTED // 当前会话被中断, 出现这种状态的原因通常是 Agent 正在等待用户审批
     }
+    @Getter
     private volatile Status status = Status.FREE; // 会话状态
+
 
     final BaseCheckpointSaver saver;
     final AgentContext agentContext;
@@ -268,7 +271,7 @@ public class AgentSession {
         if (!(raw instanceof InterruptionMetadata.Builder handledInterruption)) {
             throw new IllegalStateException("会话: " + this.agentContext.getRunId() + "没有待处理的审批上下文");
         }
-        Map<String, InterruptionMetadata.ToolFeedback> pendingInterrupted = (Map<String, InterruptionMetadata.ToolFeedback>) config.context().get("__PENDING_INTERRUPTED");
+        Map<String, InterruptionMetadata.ToolFeedback> pendingInterrupted = (Map<String, InterruptionMetadata.ToolFeedback>) config.context().get("__PENDING_INTERRUPTED__");
         for (AgentInterruptHandle handle : handles) {
             InterruptionMetadata.ToolFeedback original = pendingInterrupted.get(handle.getId());
             String originalArguments = original == null ? handle.getArguments() : original.getArguments();
