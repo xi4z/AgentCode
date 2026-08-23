@@ -31,6 +31,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import lombok.Data;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.context.annotation.Scope;
+import org.springframework.stereotype.Component;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -56,6 +60,14 @@ import java.util.stream.Collectors;
 
 import static com.agentcode.common.ShellParseHelper.*;
 
+/**
+ * AgentSession 代表一个独立会话，必须使用 prototype 作用域。
+ * 这样每次通过 AgentSessionFactory 创建都会拿到新实例：
+ * 每个 runId 的 status、sink、reactAgent、审批缓存互不干扰；
+ * 同时 AgentSession 由 Spring 容器创建，可以正常注入所需 Bean。
+ */
+@Component
+@Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
 public class AgentSession {
 
     // 检测 bash 命令是否操作 cwd 之外路径的正则规则列表（强制触发 ASK，不可被 allow 名单绕过）
@@ -72,6 +84,7 @@ public class AgentSession {
         this(agentContext, chatModel, saver, List.of("shell", "write_file"));
     }
 
+    @Autowired
     public AgentSession(AgentContext agentContext, ChatModel chatModel, BaseCheckpointSaver saver,
                         List<String> approvalTools) {
         this.agentContext = agentContext;
@@ -136,6 +149,10 @@ public class AgentSession {
         INTERRUPTED // 当前会话被中断, 出现这种状态的原因通常是 Agent 正在等待用户审批
     }
     private volatile Status status = Status.FREE; // 会话状态
+
+    public Status getStatus() {
+        return status;
+    }
 
     final BaseCheckpointSaver saver;
     final AgentContext agentContext;
