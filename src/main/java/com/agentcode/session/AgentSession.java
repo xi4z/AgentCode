@@ -1,7 +1,10 @@
-package com.agentcode.agent;
+package com.agentcode.session;
 
 import com.agentcode.common.ShellParseHelper;
 import com.agentcode.context.AgentContext;
+import com.agentcode.dto.AgentApprovalManager;
+import com.agentcode.dto.AgentInterruptHandle;
+import com.agentcode.dto.AgentStream;
 import com.agentcode.exception.AgentAlreadyRunningException;
 import com.agentcode.exception.InterruptFailException;
 import com.agentcode.exception.StopFailException;
@@ -15,8 +18,10 @@ import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemToo
 import com.alibaba.cloud.ai.graph.agent.hook.Hook;
 import com.alibaba.cloud.ai.graph.agent.hook.hip.HumanInTheLoopHook;
 import com.alibaba.cloud.ai.graph.agent.hook.hip.ToolConfig;
+import com.alibaba.cloud.ai.graph.agent.hook.modelcalllimit.ModelCallLimitHook;
 import com.alibaba.cloud.ai.graph.agent.hook.shelltool.ShellToolAgentHook;
 import com.alibaba.cloud.ai.graph.agent.hook.skills.SkillsAgentHook;
+import com.alibaba.cloud.ai.graph.agent.hook.summarization.SummarizationHook;
 import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
@@ -27,7 +32,6 @@ import com.alibaba.cloud.ai.graph.skills.registry.filesystem.FileSystemSkillRegi
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -41,13 +45,10 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -82,15 +83,21 @@ public class AgentSession {
         String workspace = resolveWorkspace(agentContext);
         this.shellTool2 = ShellTool2.builder(workspace).build();
 
-        List<Hook> hooks = new ArrayList<>();
-        hooks.add(ShellToolAgentHook.builder()
-                .shellTool2(shellTool2)
-                .shellToolName("shell")
-                .build());
 
-        // 需要人工审批的工具通过 HumanInTheLoopHook 在调用前中断
+        List<Hook> hooks = new ArrayList<>(
+                List.of(
+                ShellToolAgentHook.builder().shellTool2(shellTool2).shellToolName("shell").build(), // shell Hooks, 在审批前后防止 Shell 会话中断
+                SummarizationHook.builder().model(chatModel).maxTokensBeforeSummary(4000).messagesToKeep(20).build(), // Token 成本控制
+                ModelCallLimitHook.builder().runLimit(10).build(), // 调用控制
+                SkillsAgentHook.builder().skillRegistry(FileSystemSkillRegistry.builder()
+                        .projectSkillsDirectory(workspace+ "/skills")
+                        .build()).build() // Skill 侧控制
+                )
+        );
+
         if (!this.approvalTools.isEmpty()) {
             HumanInTheLoopHook.Builder hitlBuilder = HumanInTheLoopHook.builder();
+            // 需要人工审批的工具通过 HumanInTheLoopHook 在调用前中断
             for (String tool : this.approvalTools) {
                 hitlBuilder.approvalOn(tool, ToolConfig.builder()
                         .description("该工具调用需要人工审批")
@@ -99,14 +106,9 @@ public class AgentSession {
             hooks.add(hitlBuilder.build());
         }
 
-        // 组装 SKill 加载器
-        SkillRegistry registry = FileSystemSkillRegistry.builder()
-                .projectSkillsDirectory(workspace+ "/skills")
-                .build();
 
-        SkillsAgentHook skillsHook = SkillsAgentHook.builder()
-                .skillRegistry(registry)
-                .build();
+
+
 
         this.reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
@@ -121,7 +123,6 @@ public class AgentSession {
                         new SessionNoteTools()
                 )
                 .hooks(hooks)
-                .hooks(skillsHook)
                 .build();
 
         // 在重新 run 之后, 修改 context 状态
@@ -158,9 +159,6 @@ public class AgentSession {
     }
     private volatile RunningTask runningTask;
 
-    // 当前会话已放行的命令缓存：精确命令 + 通配符模式（仅内存，不持久化）
-    private final Set<String> sessionApprovedCommands = ConcurrentHashMap.newKeySet();
-    private final List<Pattern> sessionApprovedPatterns = new CopyOnWriteArrayList<>();
 
     public Flux<AgentStream> run(String goal){
         return run(goal, config);
@@ -463,120 +461,5 @@ public class AgentSession {
         );
     }
 
-    /**
-     * 将待审批的工具反馈列表序列化为前端可读的 JSON
-     */
-    private String toPermissionJson(List<InterruptionMetadata.ToolFeedback> feedbacks) {
-        List<Map<String, String>> items = new ArrayList<>();
-        for (InterruptionMetadata.ToolFeedback feedback : feedbacks) {
-            Map<String, String> item = new HashMap<>();
-            item.put("toolCallId", feedback.getId());
-            item.put("toolName", feedback.getName());
-            item.put("arguments", feedback.getArguments());
-            item.put("description", feedback.getDescription());
-            items.add(item);
-        }
-        try {
-            return objectMapper.writeValueAsString(items);
-        } catch (JsonProcessingException e) {
-            return "[]";
-        }
-    }
 
-
-    /**
-     * 检查 Shell 参数：解析 command 后交给静态评估
-     * @param feedback
-     * @return true 表示静态评估通过（可自动放行），false 表示需要人工审批/拒绝
-     */
-    private boolean checkShellValid(InterruptionMetadata.ToolFeedback feedback) {
-        return checkCommandValid(extractShellCommand(feedback.getArguments()));
-    }
-
-    /**
-     * bash 命令静态评估：返回是否允许自动放行。
-     * 移植自 Python 分支 permission/policy.py：
-     * deny_patterns → outside-cwd 强制 ASK → allow_patterns → default(ASK)
-     */
-    private boolean checkCommandValid(String command) {
-        if (command == null || command.isBlank()) {
-            return false;
-        }
-
-        // 复合命令（| ; && ||）拆成多个子命令，只要有一个不满足就整体不自动放行
-        for (String segment : splitShellSegments(command)) {
-            if (!checkSingleCommandValid(segment)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * 单条命令的静态评估：命中黑名单/越界则 false，命中安全名单则 true，否则默认 false
-     */
-    private boolean checkSingleCommandValid(String segment) {
-        if (segment == null || segment.isBlank()) {
-            return false;
-        }
-
-        // outside-cwd 强制 ASK，不允许被安全名单绕过
-        if (matchesOutsideCwd(segment)) {
-            return false;
-        }
-
-        List<String> tokens = ShellParseHelper.splitCommand(segment);
-        if (tokens.isEmpty()) {
-            return false;
-        }
-        String commandName = tokens.get(0);
-
-        // deny_patterns：危险命令黑名单，命中不允许自动放行
-        if (ShellParseHelper.DANGEROUS_COMMANDS.contains(commandName)) {
-            return false;
-        }
-
-        // allow_patterns：安全命令名单，命中自动放行
-        if (ShellParseHelper.safeCommands.contains(commandName)) {
-            return true;
-        }
-
-        // 默认策略：bash 默认 ASK，未命中任何名单时交给人工审批
-        return false;
-    }
-
-
-
-    /**
-     * 判断命令是否命中 outside-cwd 启发式规则
-     */
-    private boolean matchesOutsideCwd(String command) {
-        for (Pattern pattern : OUTSIDE_CWD_PATTERNS) {
-            if (pattern.matcher(command).find()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 判断命令是否已在当前会话中被批准（精确命令或通配符模式）
-     */
-    public boolean isSessionApproved(String command) {
-        return approvalManager.isSessionApproved(command);
-    }
-
-    /**
-     * 记录当前会话放行一条具体命令
-     */
-    public void approveCommandForSession(String command) {
-        approvalManager.approveCommandForSession(command);
-    }
-
-    /**
-     * 记录当前会话放行一类命令（shell 通配符，* 匹配任意串，? 匹配单个字符）
-     */
-    public void approvePatternForSession(String pattern) {
-        approvalManager.approvePatternForSession(pattern);
-    }
 }

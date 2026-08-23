@@ -1,4 +1,4 @@
-package com.agentcode.agent;
+package com.agentcode.dto;
 
 public class AgentInterruptionPending {
 

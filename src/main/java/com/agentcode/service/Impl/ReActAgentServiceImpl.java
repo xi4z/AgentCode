@@ -1,8 +1,8 @@
 package com.agentcode.service.Impl;
 
-import com.agentcode.agent.AgentInterruptHandle;
-import com.agentcode.agent.AgentSession;
-import com.agentcode.agent.AgentStream;
+import com.agentcode.dto.AgentInterruptHandle;
+import com.agentcode.session.AgentSession;
+import com.agentcode.dto.AgentStream;
 import com.agentcode.context.AgentContext;
 import com.agentcode.exception.*;
 import com.agentcode.service.ReactAgentService;

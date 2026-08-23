@@ -1,4 +1,4 @@
-package com.agentcode.agent;
+package com.agentcode.dto;
 
 import com.agentcode.common.ShellParseHelper;
 import com.agentcode.context.AgentContext;

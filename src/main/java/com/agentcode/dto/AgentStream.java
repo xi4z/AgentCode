@@ -1,4 +1,4 @@
-package com.agentcode.agent;
+package com.agentcode.dto;
 
 /**
  * 处理流式输出的类

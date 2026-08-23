@@ -1,6 +1,5 @@
-package com.agentcode.agent;
+package com.agentcode.dto;
 
-import com.alibaba.cloud.ai.graph.action.InterruptionMetadata;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 
