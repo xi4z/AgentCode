@@ -36,6 +36,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -58,6 +59,7 @@ import java.util.stream.Collectors;
 
 import static com.agentcode.common.ShellParseHelper.*;
 
+@Slf4j
 public class AgentSession {
 
     // 检测 bash 命令是否操作 cwd 之外路径的正则规则列表（强制触发 ASK，不可被 allow 名单绕过）
@@ -176,10 +178,29 @@ public class AgentSession {
                     .unicast()
                     .onBackpressureBuffer();
         }
+        long runStartNanos = System.nanoTime();
+        java.util.concurrent.atomic.AtomicInteger eventCount = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger toolEventCount = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger permissionCount = new java.util.concurrent.atomic.AtomicInteger();
+        log.info(
+                "AUDIT_AGENT_RUN_START runId={} goal={} workspace={}",
+                agentContext.getRunId(),
+                goal,
+                agentContext.getWorkspace()
+        );
         Disposable disposable;
         try {
             // 2. 启动内部 Agent，把事件转发到 sink
             disposable = reactAgent.stream(goal, runConfig).concatMap(this::classifyMessage)
+                    .doOnNext(stream -> {
+                        eventCount.incrementAndGet();
+                        if (stream.status() == AgentStream.Status.TOOL_STREAMING
+                                || stream.status() == AgentStream.Status.TOOL_FINISHED) {
+                            toolEventCount.incrementAndGet();
+                        } else if (stream.status() == AgentStream.Status.PERMISSION_REQUESTED) {
+                            permissionCount.incrementAndGet();
+                        }
+                    })
                     .doOnNext(sink::tryEmitNext)
                     .doOnComplete(() -> {
                         synchronized (this) {
@@ -189,6 +210,8 @@ public class AgentSession {
                                 status = Status.FREE;
                             }
                         }
+                        logAgentRun(runStartNanos, agentContext.getRunId(), goal, "COMPLETED",
+                                eventCount.get(), toolEventCount.get(), permissionCount.get(), null);
                         sink.tryEmitComplete();
                     })
                     .doOnError(error -> {
@@ -198,10 +221,15 @@ public class AgentSession {
                                 status = Status.FREE;
                             }
                         }
+                        logAgentRun(runStartNanos, agentContext.getRunId(), goal, "ERROR",
+                                eventCount.get(), toolEventCount.get(), permissionCount.get(),
+                                error.getMessage());
                         sink.tryEmitError(error);
                     })
                     .subscribe();
         } catch (GraphRunnerException e) {
+            logAgentRun(runStartNanos, agentContext.getRunId(), goal, "ERROR",
+                    eventCount.get(), toolEventCount.get(), permissionCount.get(), e.getMessage());
             sink.tryEmitError(e);
             synchronized (this) {
                 runningTask = null;
@@ -305,6 +333,22 @@ public class AgentSession {
         // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
         shellTool2.getSessionManager().initialize(newConfig);
         return run("");
+    }
+
+    private void logAgentRun(long runStartNanos, String runId, String goal, String result,
+                             int eventCount, int toolEventCount, int permissionCount, String error) {
+        long durationMs = (System.nanoTime() - runStartNanos) / 1_000_000;
+        if (result == null || "ERROR".equals(result)) {
+            log.warn(
+                    "AUDIT_AGENT_RUN runId={} goal={} result={} durationMs={} events={} toolEvents={} permissionRequests={} error={}",
+                    runId, goal, result, durationMs, eventCount, toolEventCount, permissionCount, error
+            );
+        } else {
+            log.info(
+                    "AUDIT_AGENT_RUN runId={} goal={} result={} durationMs={} events={} toolEvents={} permissionRequests={} error={}",
+                    runId, goal, result, durationMs, eventCount, toolEventCount, permissionCount, error
+            );
+        }
     }
 
     private String resolveWorkspace(AgentContext agentContext) {

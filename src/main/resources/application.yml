@@ -37,6 +37,8 @@ spring:
         enabled: ${MCP_CLIENT_ENABLED:false}
 
 agentcode:
+  audit:
+    enabled: ${AGENTCODE_AUDIT_ENABLED:true}
   agent:
     max-steps: ${AGENT_MAX_STEPS:20}
     system-prompt: ${AGENT_SYSTEM_PROMPT:You are a helpful AI assistant. Use the available tools to complete the user's goal. When the goal is fully achieved, respond with a final answer and do not call any more tools.}
