@@ -1,15 +1,18 @@
 package com.agentcode.tools;
 
 import com.agentcode.context.AgentContext;
-import com.alibaba.cloud.ai.graph.RunnableConfig;
-import lombok.Builder;
-import lombok.NoArgsConstructor;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 
-@NoArgsConstructor
+/**
+ * 会话笔记工具。
+ *
+ * AgentContext 通过 ReactAgent builder 的 toolContext 注入，
+ * 键名与 AgentSession 中写入的 "__AGENT_CONTEXT__" 保持一致。
+ */
 public class SessionNoteTools {
+
     @Tool(description = "用于重写当前会话的记忆, 比如有较大的会话改动时使用, 请谨慎使用")
     public void updateNote(String content, ToolContext toolContext) {
         AgentContext context = (AgentContext) toolContext.getContext().get("__AGENT_CONTEXT__");

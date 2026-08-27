@@ -3,6 +3,8 @@ package com.agentcode.agent;
 import com.agentcode.context.AgentContext;
 import com.agentcode.dto.AgentInterruptHandle;
 import com.agentcode.dto.AgentStream;
+import com.agentcode.factory.AgentSessionFactory;
+import com.agentcode.factory.SessionBuildOptions;
 import com.agentcode.session.AgentSession;
 import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
 import org.junit.jupiter.api.Test;
@@ -37,8 +39,11 @@ class AgentSessionApprovalAllTest {
                     .goal("读取 /etc/hosts")
                     .build();
             MemorySaver saver = new MemorySaver();
-            AgentSession session = new AgentSession(
-                    context, new ShellCallMockChatModel(), saver, List.of("shell"));
+            AgentSessionFactory factory = new AgentSessionFactory(
+                    new ShellCallMockChatModel(), saver, null);
+            AgentSession session = factory.create(context, SessionBuildOptions.builder()
+                    .approvalTools(List.of("shell"))
+                    .build());
 
             // 第一次运行：shell 命令需要审批
             List<AgentStream> first = session.run("读取 /etc/hosts")

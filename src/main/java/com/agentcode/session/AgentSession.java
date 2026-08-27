@@ -1,6 +1,5 @@
 package com.agentcode.session;
 
-import com.agentcode.common.ShellParseHelper;
 import com.agentcode.context.AgentContext;
 import com.agentcode.dto.AgentApprovalManager;
 import com.agentcode.dto.AgentInterruptHandle;
@@ -9,30 +8,14 @@ import com.agentcode.exception.AgentAlreadyRunningException;
 import com.agentcode.exception.InterruptFailException;
 import com.agentcode.exception.StopFailException;
 import com.agentcode.exception.TaskNotFoundException;
-import com.agentcode.tools.SessionNoteTools;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.action.InterruptionMetadata;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
-import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemTools;
-import com.alibaba.cloud.ai.graph.agent.hook.Hook;
-import com.alibaba.cloud.ai.graph.agent.hook.hip.HumanInTheLoopHook;
-import com.alibaba.cloud.ai.graph.agent.hook.hip.ToolConfig;
-import com.alibaba.cloud.ai.graph.agent.hook.modelcalllimit.ModelCallLimitHook;
-import com.alibaba.cloud.ai.graph.agent.hook.shelltool.ShellToolAgentHook;
-import com.alibaba.cloud.ai.graph.agent.hook.skills.SkillsAgentHook;
-import com.alibaba.cloud.ai.graph.agent.hook.summarization.SummarizationHook;
-import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
-import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
-import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
-import com.alibaba.cloud.ai.graph.skills.registry.SkillRegistry;
-import com.alibaba.cloud.ai.graph.skills.registry.filesystem.FileSystemSkillRegistry;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.Getter;
@@ -40,118 +23,38 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.ai.chat.model.ChatModel;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-import static com.agentcode.common.ShellParseHelper.*;
+import static com.agentcode.common.ShellParseHelper.extractShellCommand;
 
 @Slf4j
 public class AgentSession {
-
-    // 检测 bash 命令是否操作 cwd 之外路径的正则规则列表（强制触发 ASK，不可被 allow 名单绕过）
-    private static final List<Pattern> OUTSIDE_CWD_PATTERNS = List.of(
-            Pattern.compile("(^|\\s)/[^\\s]"),              // absolute path
-            Pattern.compile("(^|\\s)~"),                    // tilde home
-            Pattern.compile("(^|\\s)\\.\\.(/|$|\\s)"),      // parent traversal
-            Pattern.compile("\\$\\{?HOME\\b"),              // $HOME variable
-            Pattern.compile("\\$\\{?PWD\\b"),               // $PWD variable
-            Pattern.compile("(^|\\s|;|&&|\\|\\|)cd(\\s|$)") // explicit cd
-    );
-
-    public AgentSession(AgentContext agentContext, ChatModel chatModel, BaseCheckpointSaver saver) {
-        this(agentContext, chatModel, saver, List.of("shell", "write_file"));
-    }
-
-    public AgentSession(AgentContext agentContext, ChatModel chatModel, BaseCheckpointSaver saver,
-                        List<String> approvalTools) {
-        this.agentContext = agentContext;
-        this.saver = saver;
-        this.approvalTools = approvalTools == null ? List.of() : List.copyOf(approvalTools);
-        this.approvalManager = new AgentApprovalManager(agentContext);
-        String workspace = resolveWorkspace(agentContext);
-        this.shellTool2 = ShellTool2.builder(workspace).build();
-
-
-        List<Hook> hooks = new ArrayList<>(
-                List.of(
-                ShellToolAgentHook.builder().shellTool2(shellTool2).shellToolName("shell").build(), // shell Hooks, 在审批前后防止 Shell 会话中断
-                SummarizationHook.builder().model(chatModel).maxTokensBeforeSummary(4000).messagesToKeep(20).build(), // Token 成本控制
-                ModelCallLimitHook.builder().runLimit(10).build(), // 调用控制
-                SkillsAgentHook.builder().skillRegistry(FileSystemSkillRegistry.builder()
-                        .projectSkillsDirectory(workspace+ "/skills")
-                        .build()).build() // Skill 侧控制
-                )
-        );
-
-        if (!this.approvalTools.isEmpty()) {
-            HumanInTheLoopHook.Builder hitlBuilder = HumanInTheLoopHook.builder();
-            // 需要人工审批的工具通过 HumanInTheLoopHook 在调用前中断
-            for (String tool : this.approvalTools) {
-                hitlBuilder.approvalOn(tool, ToolConfig.builder()
-                        .description("该工具调用需要人工审批")
-                        .build());
-            }
-            hooks.add(hitlBuilder.build());
-        }
-
-
-
-
-
-        this.reactAgent = ReactAgent.builder()
-                .name("minimal_agent")
-                .model(chatModel)
-                .saver(saver)
-                .tools(List.of(
-                        GrepSearchTool.builder(workspace).build(),
-                        GlobSearchTool.builder(workspace).build())
-                )
-                .methodTools(
-                        FileSystemTools.builder().rootDir(workspace).maxFileSizeMb(10).build(),
-                        new SessionNoteTools()
-                )
-                .hooks(hooks)
-                .build();
-
-        // 在重新 run 之后, 修改 context 状态
-        this.config = RunnableConfig.builder()
-                .threadId(agentContext.getRunId()) // 获取数据
-                .build();
-        config.context().put("__AGENT_CONTEXT__", agentContext);
-    }
 
     public enum Status{
         FREE, // 当前会话没有在运行
         RUNNING, // 当前会话正在运行
         INTERRUPTED // 当前会话被中断, 出现这种状态的原因通常是 Agent 正在等待用户审批
     }
+
     @Getter
     private volatile Status status = Status.FREE; // 会话状态
 
+    private final AgentContext agentContext;
+    private final ReactAgent reactAgent;
+    private final ShellTool2 shellTool2;
+    private final AgentApprovalManager approvalManager;
 
-    final BaseCheckpointSaver saver;
-    final AgentContext agentContext;
-    final ReactAgent reactAgent;
-    final List<String> approvalTools;
-    final ShellTool2 shellTool2;
-    final AgentApprovalManager approvalManager;
-    RunnableConfig config;
-
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private volatile RunnableConfig config;
 
     @AllArgsConstructor
     @Data
@@ -161,8 +64,20 @@ public class AgentSession {
     }
     private volatile RunningTask runningTask;
 
+    public AgentSession(AgentContext agentContext, AgentSessionRuntime runtime) {
+        this.agentContext = agentContext;
+        this.reactAgent = runtime.getReactAgent();
+        this.shellTool2 = runtime.getShellTool2();
+        this.approvalManager = runtime.getApprovalManager();
+        this.config = runtime.getInitialConfig();
+    }
 
     public Flux<AgentStream> run(String goal){
+        // 新的非空输入表示开启新的一轮对话，不应继续携带上一次审批恢复的 feedback 元数据
+        if (goal != null && !goal.isBlank()) {
+            config.context().remove(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY);
+            config.metadata().ifPresent(metadata -> metadata.remove(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY));
+        }
         return run(goal, config);
     }
 
@@ -179,9 +94,9 @@ public class AgentSession {
                     .onBackpressureBuffer();
         }
         long runStartNanos = System.nanoTime();
-        java.util.concurrent.atomic.AtomicInteger eventCount = new java.util.concurrent.atomic.AtomicInteger();
-        java.util.concurrent.atomic.AtomicInteger toolEventCount = new java.util.concurrent.atomic.AtomicInteger();
-        java.util.concurrent.atomic.AtomicInteger permissionCount = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicInteger eventCount = new AtomicInteger();
+        AtomicInteger toolEventCount = new AtomicInteger();
+        AtomicInteger permissionCount = new AtomicInteger();
         log.info(
                 "AUDIT_AGENT_RUN_START runId={} goal={} workspace={}",
                 agentContext.getRunId(),
@@ -351,15 +266,6 @@ public class AgentSession {
         }
     }
 
-    private String resolveWorkspace(AgentContext agentContext) {
-        String workspace = agentContext.getWorkspace();
-        if (workspace == null || workspace.isBlank()) {
-            return System.getProperty("user.dir");
-        }
-        return workspace;
-    }
-
-
     private Flux<AgentStream> classifyMessage(NodeOutput nodeOutput) {
         if (nodeOutput instanceof InterruptionMetadata metadata) {
             return preHandleAgentInterrupt(metadata);
@@ -458,7 +364,6 @@ public class AgentSession {
             InterruptionMetadata.ToolFeedback.Builder currFeedback =
                     InterruptionMetadata.ToolFeedback.builder(feedback); // 先预处理
 
-
             if (!feedback.getName().equalsIgnoreCase("shell")){
                 // 此时检查工作目录即可
                 if (approvalManager.checkPathValid(feedback.getArguments())) {
@@ -504,6 +409,4 @@ public class AgentSession {
                         .flatMapMany(ignore -> handleAgentInterrupt(new AgentInterruptHandle[0]))
         );
     }
-
-
 }

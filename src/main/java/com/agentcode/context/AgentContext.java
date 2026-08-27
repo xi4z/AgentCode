@@ -21,7 +21,8 @@ public class AgentContext {
     String goal;
     final String workspace;
 
-    StringBuilder sessionNotes; // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
+    @Builder.Default
+    StringBuilder sessionNotes = new StringBuilder(); // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
 
     public String systemPrompt(String systemPrompt) {
         StringBuilder sb = new StringBuilder(systemPrompt == null ? "" : systemPrompt);
