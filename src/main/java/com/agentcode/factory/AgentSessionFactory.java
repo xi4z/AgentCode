@@ -2,6 +2,7 @@ package com.agentcode.factory;
 
 import com.agentcode.context.AgentContext;
 import com.agentcode.dto.AgentApprovalManager;
+import com.agentcode.dto.ApprovalPolicy;
 import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.session.AgentSession;
 import com.agentcode.session.AgentSessionRuntime;
@@ -48,6 +49,7 @@ public class AgentSessionFactory {
         AgentCodeProperties.Agent agentConfig = agentConfig();
         return create(agentContext, SessionBuildOptions.builder()
                 .systemPrompt(agentConfig.getSystemPrompt())
+                .approvalTools(resolveApprovalTools(agentConfig))
                 .build());
     }
 
@@ -60,7 +62,8 @@ public class AgentSessionFactory {
                 ? List.of()
                 : List.copyOf(options.getApprovalTools());
         String systemPrompt = options.getSystemPrompt();
-        AgentApprovalManager approvalManager = new AgentApprovalManager(agentContext);
+        AgentApprovalManager approvalManager = new AgentApprovalManager(
+                agentContext, ApprovalPolicy.from(agentConfig.getApproval()));
         String workspace = resolveWorkspace(agentContext);
         ShellTool2 shellTool2 = ShellTool2.builder(workspace).build();
 
@@ -117,6 +120,17 @@ public class AgentSessionFactory {
                 .build();
 
         return new AgentSession(agentContext, runtime);
+    }
+
+    /**
+     * 需要人工审批的工具列表：优先 {@code agentcode.agent.approval-tools}，
+     * 未配置时回落到 {@link SessionBuildOptions#DEFAULT_APPROVAL_TOOLS}。
+     */
+    private List<String> resolveApprovalTools(AgentCodeProperties.Agent agent) {
+        List<String> configured = agent.getApprovalTools();
+        return configured == null || configured.isEmpty()
+                ? SessionBuildOptions.DEFAULT_APPROVAL_TOOLS
+                : List.copyOf(configured);
     }
 
     /**

@@ -14,6 +14,18 @@ public interface ReactAgentService {
      * @return
      */
     Flux<AgentStream> startNewSession(String goal, String workspace); // 新建 AgentContext
+
+    /**
+     * 只创建会话上下文并返回 runId，不启动执行。
+     *
+     * <p>传输层需要先把 runId 回执给客户端、再订阅事件流时使用它，
+     * 避免各处复制一份 AgentContext 的创建逻辑。
+     */
+    String createSession(String goal, String workspace);
+
+    /** 会话上下文是否存在 */
+    boolean sessionExists(String runId);
+
     Flux<AgentStream> run(String goal, String runId); // 跑已有 AgentContext
 
 

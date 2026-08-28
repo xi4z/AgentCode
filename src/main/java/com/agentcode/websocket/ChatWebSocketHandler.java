@@ -2,9 +2,7 @@ package com.agentcode.websocket;
 
 import com.agentcode.dto.AgentInterruptHandle;
 import com.agentcode.dto.AgentStream;
-import com.agentcode.context.AgentContext;
 import com.agentcode.service.ReactAgentService;
-import com.agentcode.store.InMemoryAgentContextStore;
 import com.agentcode.websocket.ChatProtocol.ClientMessage;
 import com.agentcode.websocket.ChatProtocol.PermissionHandle;
 import com.agentcode.websocket.ChatProtocol.ServerMessage;
@@ -23,9 +21,9 @@ import reactor.core.publisher.Sinks;
 
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * WebSocket 端点：/ws/chat
@@ -43,7 +41,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class ChatWebSocketHandler implements WebSocketHandler {
 
     private final ReactAgentService agentService;
-    private final InMemoryAgentContextStore contextStore;
     private final ObjectMapper objectMapper;
 
     /**
@@ -105,13 +102,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
             return;
         }
 
-        String runId = UUID.randomUUID().toString();
-        AgentContext context = AgentContext.builder()
-                .runId(runId)
-                .goal(message.goal())
-                .workspace(message.workspace())
-                .build();
-        contextStore.save(runId, context);
+        String runId = agentService.createSession(message.goal(), message.workspace());
 
         send(outbound, ServerMessage.sessionStarted(message.requestId(), runId));
         subscribeAgent(session, message.requestId(), runId, message.goal(), outbound);
@@ -122,7 +113,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
             send(outbound, ServerMessage.error(message.requestId(), null, "chat 需要 runId"));
             return;
         }
-        if (contextStore.find(message.runId()).isEmpty()) {
+        if (!agentService.sessionExists(message.runId())) {
             send(outbound, ServerMessage.error(message.requestId(), message.runId(), "会话不存在: " + message.runId()));
             return;
         }
@@ -145,6 +136,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         String key = connectionId == null ? ":" + runId : connectionId + ":" + runId;
 
         Disposable disposable;
+        AtomicReference<Disposable> self = new AtomicReference<>();
         try {
             // 等待用户输入（审批请求或“还没答复齐”）时不能给前端发 done，否则客户端会认为本轮已结束
             AtomicBoolean awaitingUser = new AtomicBoolean(false);
@@ -166,16 +158,30 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                         }
                     })
                     .doOnError(error -> send(outbound, ServerMessage.error(requestId, runId, error.getMessage())))
-                    .doFinally(signal -> subscriptions.remove(key))
+                    .doFinally(signal -> {
+                        // 只摘掉自己这条订阅，避免误删同 key 的新订阅
+                        Disposable mine = self.get();
+                        if (mine != null) {
+                            subscriptions.remove(key, mine);
+                        }
+                    })
                     .subscribe();
         } catch (Exception e) {
             send(outbound, ServerMessage.error(requestId, runId, e.getMessage()));
             return;
         }
 
+        self.set(disposable);
+        if (disposable.isDisposed()) {
+            // 同步就跑完的流（例如只回 PERMISSION_PENDING 的答复）不必登记，否则会残留已完成条目
+            return;
+        }
         Disposable previous = subscriptions.put(key, disposable);
-        if (previous != null && !previous.isDisposed()) {
+        if (previous != null && previous != disposable && !previous.isDisposed()) {
             previous.dispose();
+        }
+        if (disposable.isDisposed()) {
+            subscriptions.remove(key, disposable);
         }
     }
 

@@ -1,45 +1,67 @@
 # AgentCode Java
 
-AgentCode 的 Java 实现骨架，基于 Spring Boot + Spring AI Alibaba。
+基于 Spring Boot + Spring AI Alibaba 的本地 Agent 运行时：ReAct 循环、工具调用与审批、
+流式事件（WebSocket）、会话记忆与上下文注入。
 
-> 当前仅包含项目骨架，不包含业务代码。
+## 配置
+
+`application.yml` 的 `agentcode.*` 段（均可用环境变量覆盖，见文件内注释）：
+
+| 键 | 说明 |
+| --- | --- |
+| `agent.max-steps` | 单次 run 的模型调用上限（`ModelCallLimitHook`） |
+| `agent.system-prompt` | 基础系统提示词 |
+| `agent.global-context-file` | 用户级上下文文件，支持 `~` 前缀，缺失时忽略 |
+| `agent.project-context-file` | 项目上下文文件，优先于 `.kama/context.md`、`AGENT.md`、`CLAUDE.md`、`SOUL.md` |
+| `agent.approval-tools` | 调用前需要人工审批的工具，默认 `shell,write_file,edit_file` |
+| `agent.approval.allow-patterns` | shell 通配符白名单（整条子命令匹配），如 `git status*` |
+| `agent.approval.deny-patterns` | shell 通配符黑名单，优先级高于白名单与会话级放行 |
+| `agent.approval.safe-commands` / `dangerous-commands` / `outside-cwd-patterns` | 显式配置则整体替换内置名单 |
+| `agent.session.idle-timeout` | 空闲会话回收阈值（连同 AgentContext 一起清理） |
+| `agent.session.evict-interval` | 回收/超时巡检间隔 |
+| `agent.session.approval-wait-timeout` | 等待人工审批超时，超时后放弃本轮审批并把会话置回空闲 |
+| `audit.enabled` | 是否包装 ChatModel 输出 AI 调用审计日志 |
+
+### 命令审批判定顺序
+
+`deny-patterns` / 危险命令 → 命中即人工；
+越界（绝对路径、`~`、`..`、`$HOME`、显式 `cd`）→ 强制人工，白名单不可绕过；
+`allow-patterns` → 自动放行；
+`safe-commands` → 自动放行；
+其余默认人工。
+
+用户在审批时选择 `APPROVE_ALL` 只缓存**精确命令**，且不会覆盖黑名单与越界检查；
+需要长期放行一类命令请写进 `agent.approval.allow-patterns`。
 
 ## 目录结构
 
 ```text
 Java/
 ├── pom.xml
-├── src/
-│   ├── main/
-│   │   ├── java/com/agentcode/
-│   │   │   ├── agent/                  # Agent 编排：Graph、Node、Subagent
-│   │   │   │   ├── graph/
-│   │   │   │   ├── node/
-│   │   │   │   └── subagent/
-│   │   │   ├── common/                 # 通用 DTO / 结果类型 / 常量
-│   │   │   ├── compact/                # 上下文压缩
-│   │   │   ├── config/                 # Spring 配置与属性绑定
-│   │   │   ├── context/                # AgentContext / ExecutionContext
-│   │   │   ├── event/                  # 事件发布与 SSE/WebSocket 推送
-│   │   │   ├── mcp/                    # MCP 客户端与工具适配
-│   │   │   ├── permission/             # 权限策略与拦截
-│   │   │   │   ├── policy/
-│   │   │   │   └── interceptor/
-│   │   │   ├── session/                # 会话、记忆、持久化
-│   │   │   │   ├── memory/
-│   │   │   │   ├── model/
-│   │   │   │   └── store/
-│   │   │   ├── skill/                  # Skills 加载与渲染
-│   │   │   ├── task/                   # 任务管理
-│   │   │   ├── tool/                   # 工具定义与调用
-│   │   │   │   ├── builtin/
-│   │   │   │   └── callback/
-│   │   │   ├── trace/                  # 可观测性与 Trace
-│   │   │   └── transport/              # 对外通信（WebSocket/SSE/JSON-RPC）
-│   │   └── resources/
-│   │       └── application.yml         # Spring 配置
-│   └── test/
-│       └── java/com/agentcode/         # 对应模块测试
+├── scripts/terminal-chat.mjs        # 终端多轮对话客户端（Node 22+）
+└── src/
+    ├── main/
+    │   ├── java/com/agentcode/
+    │   │   ├── AgentCodeApplication.java
+    │   │   ├── audit/                 # ChatModel 审计包装（AUDIT_AI_CALL / AUDIT_AI_STREAM）
+    │   │   ├── common/                # ShellParseHelper、SessionConfigKeys、ContextInjector
+    │   │   ├── config/                # ChatClient、CheckpointSaver 装配
+    │   │   ├── context/               # AgentContext：系统提示词 + 全局/项目上下文 + 会话笔记
+    │   │   ├── dto/                   # AgentStream、AgentApprovalManager、ApprovalPolicy、审批/中断 DTO
+    │   │   ├── exception/             # 会话与审批相关异常
+    │   │   ├── factory/               # AgentSessionFactory、SessionBuildOptions（装配 Hook/Tools）
+    │   │   ├── properties/            # AgentCodeProperties（agentcode.* 配置绑定）
+    │   │   ├── registry/              # AgentSessionRegistry：活跃会话表 + 空闲回收
+    │   │   ├── service/               # ReactAgentService 与 AgentSessionMaintenance（定时清理）
+    │   │   ├── session/               # AgentSession：run/stop/interrupt/审批恢复状态机
+    │   │   ├── store/                 # InMemoryAgentContextStore（待替换为持久化实现）
+    │   │   ├── tools/                 # SessionNoteTools 等本地工具
+    │   │   ├── utils/                 # SpringContextUtil
+    │   │   └── websocket/             # /ws/chat 协议与处理器、静态页面路由
+    │   └── resources/
+    │       ├── application.yml
+    │       └── static/index.html      # 浏览器 Web UI
+    └── test/java/com/agentcode/       # 对应模块测试
 ```
 
 ## 技术栈
