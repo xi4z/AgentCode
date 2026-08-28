@@ -5,7 +5,9 @@ import com.agentcode.session.AgentSession;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
@@ -55,14 +57,37 @@ public class AgentSessionRegistry {
 
     /**
      * 清理超过 maxIdle 且当前处于 FREE 状态的会话。
+     *
+     * @return 被淘汰的 runId，调用方需据此清理 AgentContext 等关联状态
      */
-    public void evictIdle(Duration maxIdle) {
+    public Set<String> evictIdle(Duration maxIdle) {
         long threshold = System.currentTimeMillis() - maxIdle.toMillis();
+        Set<String> evicted = new LinkedHashSet<>();
         sessions.entrySet().removeIf(entry -> {
             SessionEntry value = entry.getValue();
-            return value.lastAccessAt < threshold
+            boolean stale = value.lastAccessAt < threshold
                     && value.session.getStatus() == AgentSession.Status.FREE;
+            if (stale) {
+                evicted.add(entry.getKey());
+            }
+            return stale;
         });
+        return evicted;
+    }
+
+    /**
+     * 放弃等待人工审批超时的会话（清理审批上下文并置回 FREE）。
+     *
+     * @return 被放弃审批的 runId
+     */
+    public Set<String> abandonExpiredApprovalWaits(Duration maxWait) {
+        Set<String> abandoned = new LinkedHashSet<>();
+        sessions.forEach((runId, entry) -> {
+            if (entry.session.abandonStaleApproval(maxWait)) {
+                abandoned.add(runId);
+            }
+        });
+        return abandoned;
     }
 
     /**

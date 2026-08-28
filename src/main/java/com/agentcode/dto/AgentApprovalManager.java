@@ -16,15 +16,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.regex.Pattern;
 
 /**
- * 工具审批策略与会话级审批缓存。
+ * 工具审批与会话级审批缓存。
  *
  * 负责：
- * - shell/文件工具的静态安全检查（checkCommandValid / checkPathValid）
- * - 会话内已放行命令的缓存（approveCommandForSession / approvePatternForSession）
+ * - shell/文件工具的静态安全检查（策略委托给 {@link ApprovalPolicy}，可由配置覆盖）
+ * - 会话内已放行命令的缓存（来自用户 APPROVE_ALL 的精确命令）
  * - 审批反馈序列化与参数处理
  */
 public class AgentApprovalManager {
@@ -33,25 +31,25 @@ public class AgentApprovalManager {
     private static final List<String> FILE_PATH_KEYS = List.of(
             "file_path", "filePath", "filepath", "path", "target_file", "notebook_path");
 
-    // 检测 bash 命令是否操作 cwd 之外路径的正则规则列表（强制触发 ASK，不可被 allow 名单绕过）
-    private static final List<Pattern> OUTSIDE_CWD_PATTERNS = List.of(
-            Pattern.compile("(^|\\s)/[^\\s]"),              // absolute path
-            Pattern.compile("(^|\\s)~"),                    // tilde home
-            Pattern.compile("(^|\\s)\\.\\.(/|$|\\s)"),      // parent traversal
-            Pattern.compile("\\$\\{?HOME\\b"),              // $HOME variable
-            Pattern.compile("\\$\\{?PWD\\b"),               // $PWD variable
-            Pattern.compile("(^|\\s|;|&&|\\|\\|)cd(\\s|$)") // explicit cd
-    );
-
     private final AgentContext agentContext;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ApprovalPolicy policy;
 
-    // 当前会话已放行的命令缓存：精确命令 + 通配符模式（仅内存，不持久化）
+    // 当前会话已放行的命令缓存（仅内存，不持久化）
     private final Set<String> sessionApprovedCommands = ConcurrentHashMap.newKeySet();
-    private final List<Pattern> sessionApprovedPatterns = new CopyOnWriteArrayList<>();
 
     public AgentApprovalManager(AgentContext agentContext) {
+        this(agentContext, ApprovalPolicy.defaults());
+    }
+
+    public AgentApprovalManager(AgentContext agentContext, ApprovalPolicy policy) {
         this.agentContext = agentContext;
+        this.policy = policy == null ? ApprovalPolicy.defaults() : policy;
+    }
+
+    /** 当前生效的审批策略（便于审计与测试观察） */
+    public ApprovalPolicy policy() {
+        return policy;
     }
 
     /**
@@ -126,86 +124,26 @@ public class AgentApprovalManager {
     }
 
     /**
-     * bash 命令静态评估：返回是否允许自动放行。
-     * 移植自 Python 分支 permission/policy.py：
-     * deny_patterns → outside-cwd 强制 ASK → allow_patterns → default(ASK)
+     * bash 命令静态评估：是否允许自动放行。评估规则见 {@link ApprovalPolicy}
+     * （deny → outside-cwd 强制人工 → allow → 默认人工），名单可由 agentcode.agent.approval.* 覆盖。
      */
     public boolean checkCommandValid(String command) {
-        if (command == null || command.isBlank()) {
-            return false;
-        }
-
-        // 复合命令（| ; && ||）拆成多个子命令，只要有一个不满足就整体不自动放行
-        for (String segment : ShellParseHelper.splitShellSegments(command)) {
-            if (!checkSingleCommandValid(segment)) {
-                return false;
-            }
-        }
-        return true;
+        return policy.autoApproves(command);
     }
 
     /**
-     * 单条命令的静态评估：命中黑名单/越界则 false，命中安全名单则 true，否则默认 false
-     */
-    private boolean checkSingleCommandValid(String segment) {
-        if (segment == null || segment.isBlank()) {
-            return false;
-        }
-
-        // outside-cwd 强制 ASK，不允许被安全名单绕过
-        if (matchesOutsideCwd(segment)) {
-            return false;
-        }
-
-        List<String> tokens = ShellParseHelper.splitCommand(segment);
-        if (tokens.isEmpty()) {
-            return false;
-        }
-        String commandName = tokens.get(0);
-
-        // deny_patterns：危险命令黑名单，命中不允许自动放行
-        if (ShellParseHelper.DANGEROUS_COMMANDS.contains(commandName)) {
-            return false;
-        }
-
-        // allow_patterns：安全命令名单，命中自动放行
-        if (ShellParseHelper.safeCommands.contains(commandName)) {
-            return true;
-        }
-
-        // 默认策略：bash 默认 ASK，未命中任何名单时交给人工审批
-        return false;
-    }
-
-    /**
-     * 判断命令是否命中 outside-cwd 启发式规则
-     */
-    private boolean matchesOutsideCwd(String command) {
-        for (Pattern pattern : OUTSIDE_CWD_PATTERNS) {
-            if (pattern.matcher(command).find()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 判断命令是否已在当前会话中被批准（精确命令或通配符模式）
+     * 判断命令是否已在当前会话中被批准（来自用户 APPROVE_ALL 的精确命令）。
+     *
+     * <p>会话级放行不能覆盖 deny/危险命令：即使用户曾经一律批准，命中黑名单时仍然询问。
      */
     public boolean isSessionApproved(String command) {
         if (command == null || command.isBlank()) {
             return false;
         }
-        String normalized = command.trim();
-        if (sessionApprovedCommands.contains(normalized)) {
-            return true;
+        if (policy.isDenied(command)) {
+            return false;
         }
-        for (Pattern pattern : sessionApprovedPatterns) {
-            if (pattern.matcher(normalized).matches()) {
-                return true;
-            }
-        }
-        return false;
+        return sessionApprovedCommands.contains(command.trim());
     }
 
     /**
@@ -216,16 +154,6 @@ public class AgentApprovalManager {
             return;
         }
         sessionApprovedCommands.add(command.trim());
-    }
-
-    /**
-     * 记录当前会话放行一类命令（shell 通配符，* 匹配任意串，? 匹配单个字符）
-     */
-    public void approvePatternForSession(String pattern) {
-        if (pattern == null || pattern.isBlank()) {
-            return;
-        }
-        sessionApprovedPatterns.add(ShellParseHelper.compileShellWildcard(pattern.trim()));
     }
 
     /**

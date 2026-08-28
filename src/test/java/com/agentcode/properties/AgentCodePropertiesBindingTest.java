@@ -49,6 +49,12 @@ class AgentCodePropertiesBindingTest {
                 .isEqualTo(20);
         assertThat(properties.getAgent().getGlobalContextFile()).isEqualTo("~/.agent/context.md");
         assertThat(properties.getAgent().getProjectContextFile()).isEqualTo(".agent/context.md");
+        assertThat(properties.getAgent().getApprovalTools())
+                .as("edit_file 必须在默认审批工具列表内，否则改文件绕过审批")
+                .containsExactly("shell", "write_file", "edit_file");
+        assertThat(properties.getAgent().getSession().getIdleTimeout()).hasMinutes(30);
+        assertThat(properties.getAgent().getSession().getEvictInterval()).hasMinutes(5);
+        assertThat(properties.getAgent().getSession().getApprovalWaitTimeout()).hasMinutes(10);
         assertThat(properties.getAudit().isEnabled()).isTrue();
     }
 }

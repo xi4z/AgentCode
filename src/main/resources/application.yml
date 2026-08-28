@@ -45,6 +45,31 @@ agentcode:
     global-context-file: ${AGENT_GLOBAL_CONTEXT_FILE:~/.agent/context.md}
     project-context-file: ${AGENT_PROJECT_CONTEXT_FILE:.agent/context.md}
 
+    # 需要在调用前人工审批的工具；逗号分隔，未配置时用内置 shell,write_file,edit_file
+    approval-tools: ${AGENT_APPROVAL_TOOLS:shell,write_file,edit_file}
+
+    approval:
+      # 追加的 shell 通配符白名单（整条子命令匹配才生效，"git status*" 不会命中 "sudo git status"）
+      allow-patterns: []
+      #   - "git status*"
+      #   - "ls *"
+      # 追加的黑名单，优先级高于白名单与会话级放行
+      deny-patterns: []
+      #   - "curl *"
+      # safe-commands / dangerous-commands / outside-cwd-patterns 不配置时使用 ApprovalPolicy 内置名单；
+      # 一旦显式配置则整体替换对应内置名单（白名单语义下追加更容易误开放行面）
+      # safe-commands: [ls, cat, pwd, echo]
+      # dangerous-commands: [rm, dd, mkfs, chmod]
+      # outside-cwd-patterns: ["(^|\\s)/[^\\s]", "(^|\\s)~"]
+
+    session:
+      # 空闲多久后回收 FREE 会话（连同 AgentContext 一起清理）
+      idle-timeout: ${AGENT_SESSION_IDLE_TIMEOUT:30m}
+      # 清理任务执行间隔（同时驱动审批等待超时检查）
+      evict-interval: ${AGENT_SESSION_EVICT_INTERVAL:5m}
+      # 等待人工审批超过该时长则放弃本轮审批，会话回到 FREE
+      approval-wait-timeout: ${AGENT_APPROVAL_WAIT_TIMEOUT:10m}
+
 # 若需要配置 Spring AI 原生 MCP client，可参考：
 # spring:
 #   ai:
