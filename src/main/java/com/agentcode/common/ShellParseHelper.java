@@ -121,16 +121,24 @@ public final class ShellParseHelper {
         return tokens;
     }
 
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
     /**
-     * 从工具参数 JSON 中解析出 shell command
+     * 从工具参数 JSON 中解析出 shell command。
+     *
+     * @return 命令内容；参数不是合法 JSON 或没有 command 字段时返回 null（调用方据此走人工审批）
      */
     public static String extractShellCommand(String arguments) {
+        if (arguments == null || arguments.isBlank()) {
+            return null;
+        }
         try {
-            ObjectMapper mapper = new ObjectMapper();
-            JsonNode root = mapper.readTree(arguments);
-            return root.path("command").asText();
+            JsonNode root = OBJECT_MAPPER.readTree(arguments);
+            JsonNode command = root.get("command");
+            return command != null && command.isTextual() ? command.asText() : null;
         } catch (Exception e) {
-            throw new RuntimeException(e);
+            // 不能把解析异常抛回事件流，否则整轮 run 会以 error 结束
+            return null;
         }
     }
 
