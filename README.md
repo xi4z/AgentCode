@@ -22,6 +22,10 @@
 | `agent.session.approval-wait-timeout` | 等待人工审批超时，超时后放弃本轮审批并把会话置回空闲 |
 | `audit.enabled` | 是否包装 ChatModel 输出 AI 调用审计日志 |
 
+> ⚠️ API Key 只通过 `OPENAI_API_KEY` / `DASHSCOPE_API_KEY` 环境变量注入，不要写进 `application.yml`
+> 或提交到仓库；`global-context-file` 与 `project-context-file` 的内容会拼进 system prompt
+> 并发送给模型提供方，因此**不要往这两个文件里放密钥**（审计日志只记录长度与计数，不落 prompt 正文）。
+
 ### 命令审批判定顺序
 
 `deny-patterns` / 危险命令 → 命中即人工；
