@@ -13,6 +13,7 @@ import com.alibaba.cloud.ai.graph.agent.hook.hip.HumanInTheLoopHook;
 import com.alibaba.cloud.ai.graph.agent.hook.hip.ToolConfig;
 import com.alibaba.cloud.ai.graph.agent.hook.modelcalllimit.ModelCallLimitHook;
 import com.alibaba.cloud.ai.graph.agent.hook.shelltool.ShellToolAgentHook;
+import com.agentcode.common.SessionConfigKeys;
 import com.alibaba.cloud.ai.graph.agent.hook.skills.SkillsAgentHook;
 import com.alibaba.cloud.ai.graph.agent.hook.summarization.SummarizationHook;
 import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemTools;
@@ -26,8 +27,11 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+
+import static com.agentcode.context.AgentContext.DEFAULT_PROJECT_CONTEXT_FILES;
 
 /**
  * AgentSession 工厂：负责组装 ReactAgent、Hooks、Tools、RunnableConfig。
@@ -41,13 +45,17 @@ public class AgentSessionFactory {
     private final AgentCodeProperties agentCodeProperties;
 
     public AgentSession create(AgentContext agentContext) {
-        String systemPrompt = agentCodeProperties == null ? null : agentCodeProperties.getSystemPrompt();
+        AgentCodeProperties.Agent agentConfig = agentConfig();
         return create(agentContext, SessionBuildOptions.builder()
-                .systemPrompt(systemPrompt)
+                .systemPrompt(agentConfig.getSystemPrompt())
                 .build());
     }
 
     public AgentSession create(AgentContext agentContext, SessionBuildOptions options) {
+        AgentCodeProperties.Agent agentConfig = agentConfig();
+        // 配置文件路径与模型步数来自 agentcode.agent.*，必须在拼接 system prompt 之前注入
+        applyContextConfig(agentContext, agentConfig);
+
         List<String> approvalTools = options.getApprovalTools() == null
                 ? List.of()
                 : List.copyOf(options.getApprovalTools());
@@ -60,7 +68,7 @@ public class AgentSessionFactory {
                 List.of(
                         ShellToolAgentHook.builder().shellTool2(shellTool2).shellToolName("shell").build(), // shell Hooks, 在审批前后防止 Shell 会话中断
                         SummarizationHook.builder().model(chatModel).maxTokensBeforeSummary(4000).messagesToKeep(20).build(), // Token 成本控制
-                        ModelCallLimitHook.builder().runLimit(10).build(), // 调用控制
+                        ModelCallLimitHook.builder().runLimit(agentConfig.getMaxSteps()).build(), // 调用控制，取 agentcode.agent.max-steps
                         SkillsAgentHook.builder().skillRegistry(FileSystemSkillRegistry.builder()
                                 .projectSkillsDirectory(workspace + "/skills")
                                 .build()).build() // Skill 侧控制
@@ -91,7 +99,7 @@ public class AgentSessionFactory {
                         FileSystemTools.builder().rootDir(workspace).maxFileSizeMb(10).build(),
                         new SessionNoteTools()
                 )
-                .toolContext(Map.of("__AGENT_CONTEXT__", agentContext))
+                .toolContext(Map.of(SessionConfigKeys.AGENT_CONTEXT, agentContext))
                 .hooks(hooks)
                 .build();
 
@@ -99,7 +107,7 @@ public class AgentSessionFactory {
         RunnableConfig config = RunnableConfig.builder()
                 .threadId(agentContext.getRunId()) // 获取数据
                 .build();
-        config.context().put("__AGENT_CONTEXT__", agentContext);
+        config.context().put(SessionConfigKeys.AGENT_CONTEXT, agentContext);
 
         AgentSessionRuntime runtime = AgentSessionRuntime.builder()
                 .reactAgent(reactAgent)
@@ -109,6 +117,33 @@ public class AgentSessionFactory {
                 .build();
 
         return new AgentSession(agentContext, runtime);
+    }
+
+    /**
+     * 属性未注册（如单测直接 new 工厂）时也要拿到一份可用默认值，避免 NPE 与配置漂移。
+     */
+    private AgentCodeProperties.Agent agentConfig() {
+        AgentCodeProperties.Agent agent = agentCodeProperties == null ? null : agentCodeProperties.getAgent();
+        return agent != null ? agent : new AgentCodeProperties.Agent();
+    }
+
+    /**
+     * 把 agentcode.agent.* 中的上下文文件配置注入会话上下文：
+     * 配置的项目上下文文件排在默认候选之前，并去重。
+     */
+    private void applyContextConfig(AgentContext agentContext, AgentCodeProperties.Agent agent) {
+        if (agentContext == null) {
+            return;
+        }
+        if (agent.getGlobalContextFile() != null && !agent.getGlobalContextFile().isBlank()) {
+            agentContext.setGlobalContextFile(agent.getGlobalContextFile());
+        }
+        if (agent.getProjectContextFile() != null && !agent.getProjectContextFile().isBlank()) {
+            LinkedHashSet<String> candidates = new LinkedHashSet<>();
+            candidates.add(agent.getProjectContextFile());
+            candidates.addAll(DEFAULT_PROJECT_CONTEXT_FILES);
+            agentContext.setProjectContextFiles(new ArrayList<>(candidates));
+        }
     }
 
     private String resolveWorkspace(AgentContext agentContext) {
