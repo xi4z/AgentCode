@@ -149,6 +149,12 @@ public class AgentSession {
                                 error.getMessage());
                         sink.tryEmitError(error);
                     })
+                    // 把 runId 注入内部链的 Reactor Context，供 AuditedChatModel 读取，
+                    // 使 AUDIT_AI_STREAM 能按 runId 关联（注意：必须在真正 subscribe 的
+                    // 这条内部链上写，外层 sink.asFlux() 的 context 不会传进来）。
+                    .contextWrite(context -> context.put(
+                            com.agentcode.audit.AuditedChatModel.RUN_ID_CONTEXT_KEY,
+                            agentContext.getRunId()))
                     .subscribe();
         } catch (GraphRunnerException e) {
             logAgentRun(runStartNanos, agentContext.getRunId(), goal, "ERROR",

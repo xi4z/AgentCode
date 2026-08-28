@@ -27,6 +27,12 @@ public class AuditedChatModel implements ChatModel {
     private final ChatModel delegate;
     private final boolean enabled;
 
+    /**
+     * Reactor Context 中承载当前 run 的 key；由 {@code AgentSession.run} 的
+     * {@code contextWrite} 注入，用于把 AI 审计日志关联到具体 run。
+     */
+    public static final String RUN_ID_CONTEXT_KEY = "agentcode.runId";
+
     public AuditedChatModel(ChatModel delegate, boolean enabled) {
         this.delegate = delegate;
         this.enabled = enabled;
@@ -59,40 +65,53 @@ public class AuditedChatModel implements ChatModel {
         AtomicInteger chunks = new AtomicInteger();
         AtomicInteger contentLength = new AtomicInteger();
         AtomicInteger toolCalls = new AtomicInteger();
+        // 流式 usage 通常只在最后一个 chunk 出现，也可能分片上报；
+        // 逐字段取最大值聚合，避免被中间的空 chunk 覆盖成 0。
+        AtomicInteger promptTokens = new AtomicInteger();
+        AtomicInteger completionTokens = new AtomicInteger();
+        AtomicInteger totalTokens = new AtomicInteger();
 
-        return delegate.stream(prompt)
-                .doOnNext(response -> {
-                    chunks.incrementAndGet();
-                    contentLength.addAndGet(responseLength(response));
-                    toolCalls.addAndGet(toolCalls(response));
-                })
-                .doOnComplete(() -> {
-                    if (enabled) {
-                        log.info(
-                                "AUDIT_AI_STREAM model={} durationMs={} promptMessages={} chunks={} responseLength={} toolCalls={} promptTokens={} completionTokens={} totalTokens={}",
-                                resolveModel(null, prompt),
-                                (System.nanoTime() - start) / 1_000_000,
-                                prompt.getInstructions().size(),
-                                chunks.get(),
-                                contentLength.get(),
-                                toolCalls.get(),
-                                0,
-                                0,
-                                0
-                        );
-                    }
-                })
-                .doOnError(error -> {
-                    if (enabled) {
-                        log.warn(
-                                "AUDIT_AI_STREAM_ERROR model={} durationMs={} promptMessages={} error={}",
-                                resolveModel(null, prompt),
-                                (System.nanoTime() - start) / 1_000_000,
-                                prompt.getInstructions().size(),
-                                error.getMessage()
-                        );
-                    }
-                });
+        // deferContextual 读取 AgentSession 通过 contextWrite 注入的 runId，
+        // 让 AI 审计日志可直接按 runId 关联（并发场景下比时间窗口归因更可靠）。
+        return Flux.deferContextual(ctx -> {
+            String runId = ctx.getOrDefault(RUN_ID_CONTEXT_KEY, "-");
+            return delegate.stream(prompt)
+                    .doOnNext(response -> {
+                        chunks.incrementAndGet();
+                        contentLength.addAndGet(responseLength(response));
+                        toolCalls.addAndGet(toolCalls(response));
+                        accumulateUsageMax(usage(response), promptTokens, completionTokens, totalTokens);
+                    })
+                    .doOnComplete(() -> {
+                        if (enabled) {
+                            log.info(
+                                    "AUDIT_AI_STREAM runId={} model={} durationMs={} promptMessages={} chunks={} responseLength={} toolCalls={} promptTokens={} completionTokens={} totalTokens={}",
+                                    runId,
+                                    resolveModel(null, prompt),
+                                    (System.nanoTime() - start) / 1_000_000,
+                                    prompt.getInstructions().size(),
+                                    chunks.get(),
+                                    contentLength.get(),
+                                    toolCalls.get(),
+                                    promptTokens.get(),
+                                    completionTokens.get(),
+                                    totalTokens.get()
+                            );
+                        }
+                    })
+                    .doOnError(error -> {
+                        if (enabled) {
+                            log.warn(
+                                    "AUDIT_AI_STREAM_ERROR runId={} model={} durationMs={} promptMessages={} error={}",
+                                    runId,
+                                    resolveModel(null, prompt),
+                                    (System.nanoTime() - start) / 1_000_000,
+                                    prompt.getInstructions().size(),
+                                    error.getMessage()
+                            );
+                        }
+                    });
+        });
     }
 
     @Override
@@ -166,5 +185,30 @@ public class AuditedChatModel implements ChatModel {
             return null;
         }
         return response.getMetadata().getUsage();
+    }
+
+    /**
+     * 流式聚合 usage：逐字段取最大值。
+     *
+     * <p>OpenAI 兼容的流式返回常常只在最后一个 chunk 带 usage，
+     * 中间 chunk 的 usage 为 0/null；取最大值既能拿到最终值，
+     * 也能兼容分片累加上报的实现，避免被后续空值覆盖成 0。
+     */
+    private void accumulateUsageMax(Usage usage,
+                                    AtomicInteger promptTokens,
+                                    AtomicInteger completionTokens,
+                                    AtomicInteger totalTokens) {
+        if (usage == null) {
+            return;
+        }
+        mergeMax(usage.getPromptTokens(), promptTokens);
+        mergeMax(usage.getCompletionTokens(), completionTokens);
+        mergeMax(usage.getTotalTokens(), totalTokens);
+    }
+
+    private void mergeMax(Integer value, AtomicInteger accumulator) {
+        if (value != null) {
+            accumulator.accumulateAndGet(value, Math::max);
+        }
     }
 }
