@@ -3,6 +3,8 @@ package com.agentcode.websocket;
 import com.agentcode.dto.AgentStream;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
+import java.util.List;
+
 /**
  * WebSocket 持续对话使用的 JSON 协议。
  * 所有消息都通过 type 区分，其余字段按消息类型按需填写。
@@ -26,6 +28,20 @@ public final class ChatProtocol {
             String toolName,
             String decision,
             String arguments,
+            String feedback,
+            /** permission_respond 的批量形式：一次提交本轮全部审批决定 */
+            List<PermissionHandle> handles
+    ) {
+    }
+
+    /** permission_respond 中单个工具的审批决定 */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record PermissionHandle(
+            String toolCallId,
+            String toolName,
+            String arguments,
+            String description,
+            String decision,
             String feedback
     ) {
     }
@@ -73,6 +89,16 @@ public final class ChatProtocol {
                                                         String arguments, String description) {
             return new ServerMessage("permission_requested", requestId, runId, null, null, null,
                     toolCallId, toolName, arguments, description);
+        }
+
+        /**
+         * 本轮仍有未答复的审批项：已记录本次决定，等答复齐后才会恢复执行。
+         *
+         * @param content 尚未答复的 toolCallId JSON 数组
+         */
+        public static ServerMessage permissionPending(String requestId, String runId, String content) {
+            return new ServerMessage("permission_pending", requestId, runId, null, content, null,
+                    null, null, null, null);
         }
 
         public static ServerMessage error(String requestId, String runId, String message) {

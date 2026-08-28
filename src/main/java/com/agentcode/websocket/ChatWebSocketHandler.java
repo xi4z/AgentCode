@@ -6,6 +6,7 @@ import com.agentcode.context.AgentContext;
 import com.agentcode.service.ReactAgentService;
 import com.agentcode.store.InMemoryAgentContextStore;
 import com.agentcode.websocket.ChatProtocol.ClientMessage;
+import com.agentcode.websocket.ChatProtocol.PermissionHandle;
 import com.agentcode.websocket.ChatProtocol.ServerMessage;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -20,6 +21,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -144,18 +146,22 @@ public class ChatWebSocketHandler implements WebSocketHandler {
 
         Disposable disposable;
         try {
-            AtomicBoolean permissionRequested = new AtomicBoolean(false);
+            // 等待用户输入（审批请求或“还没答复齐”）时不能给前端发 done，否则客户端会认为本轮已结束
+            AtomicBoolean awaitingUser = new AtomicBoolean(false);
             disposable = stream
                     .doOnNext(event -> {
                         if (event.status() == AgentStream.Status.PERMISSION_REQUESTED) {
-                            permissionRequested.set(true);
+                            awaitingUser.set(true);
                             sendPermissionRequests(outbound, requestId, runId, event.content());
+                        } else if (event.status() == AgentStream.Status.PERMISSION_PENDING) {
+                            awaitingUser.set(true);
+                            send(outbound, ServerMessage.permissionPending(requestId, runId, event.content()));
                         } else {
                             send(outbound, ServerMessage.agentEvent(runId, event));
                         }
                     })
                     .doOnComplete(() -> {
-                        if (!permissionRequested.get()) {
+                        if (!awaitingUser.get()) {
                             send(outbound, ServerMessage.done(runId));
                         }
                     })
@@ -194,37 +200,60 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         }
     }
 
+    /**
+     * 处理审批答复。支持两种写法：
+     * <ul>
+     *   <li>单个：顶层 {@code toolCallId + decision}（老客户端）</li>
+     *   <li>批量：{@code handles: [{toolCallId, decision, ...}]}，一次提交本轮全部决定</li>
+     * </ul>
+     * 服务端会缓存决定，等本轮待审批项全部答复后才恢复 Agent 执行。
+     */
     private void permissionRespond(WebSocketSession session, ClientMessage message, Sinks.Many<String> outbound) {
-        if (message.runId() == null || message.runId().isBlank()
-                || message.toolCallId() == null || message.toolCallId().isBlank()
-                || message.decision() == null || message.decision().isBlank()) {
-            send(outbound, ServerMessage.error(message.requestId(), message.runId(),
-                    "permission_respond 需要 runId、toolCallId、decision"));
+        if (message.runId() == null || message.runId().isBlank()) {
+            send(outbound, ServerMessage.error(message.requestId(), message.runId(), "permission_respond 需要 runId"));
             return;
         }
 
-        AgentInterruptHandle.Decision decision;
-        try {
-            decision = AgentInterruptHandle.Decision.valueOf(message.decision().trim().toUpperCase());
-        } catch (IllegalArgumentException e) {
-            send(outbound, ServerMessage.error(message.requestId(), message.runId(),
-                    "未知 decision: " + message.decision() + "，可选 APPROVED/APPROVE_ALL/REJECTED/EDITED"));
-            return;
+        List<PermissionHandle> submitted;
+        if (message.handles() != null && !message.handles().isEmpty()) {
+            submitted = message.handles();
+        } else {
+            submitted = List.of(new PermissionHandle(
+                    message.toolCallId(), message.toolName(), message.arguments(),
+                    null, message.decision(), message.feedback()));
         }
 
-        AgentInterruptHandle handle = new AgentInterruptHandle(
-                message.runId(),
-                message.toolCallId(),
-                message.toolName(),
-                message.arguments(),
-                null,
-                decision,
-                message.feedback()
-        );
+        AgentInterruptHandle[] handles = new AgentInterruptHandle[submitted.size()];
+        for (int i = 0; i < submitted.size(); i++) {
+            PermissionHandle item = submitted.get(i);
+            if (item == null || item.toolCallId() == null || item.toolCallId().isBlank()
+                    || item.decision() == null || item.decision().isBlank()) {
+                send(outbound, ServerMessage.error(message.requestId(), message.runId(),
+                        "permission_respond 需要每个审批项的 toolCallId 与 decision"));
+                return;
+            }
+            AgentInterruptHandle.Decision decision;
+            try {
+                decision = AgentInterruptHandle.Decision.valueOf(item.decision().trim().toUpperCase());
+            } catch (IllegalArgumentException e) {
+                send(outbound, ServerMessage.error(message.requestId(), message.runId(),
+                        "未知 decision: " + item.decision() + "，可选 APPROVED/APPROVE_ALL/REJECTED/EDITED"));
+                return;
+            }
+            handles[i] = new AgentInterruptHandle(
+                    message.runId(),
+                    item.toolCallId(),
+                    item.toolName(),
+                    item.arguments(),
+                    item.description(),
+                    decision,
+                    item.feedback()
+            );
+        }
 
         try {
             subscribe(session, message.requestId(), message.runId(),
-                    agentService.handleInterrupt(handle), outbound);
+                    agentService.handleInterrupt(message.runId(), handles), outbound);
         } catch (Exception e) {
             send(outbound, ServerMessage.error(message.requestId(), message.runId(), e.getMessage()));
         }

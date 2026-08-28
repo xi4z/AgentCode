@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,10 @@ import java.util.regex.Pattern;
  * - 审批反馈序列化与参数处理
  */
 public class AgentApprovalManager {
+
+    /** 文件工具参数中可能出现的绝对路径键（框架实际使用 file_path） */
+    private static final List<String> FILE_PATH_KEYS = List.of(
+            "file_path", "filePath", "filepath", "path", "target_file", "notebook_path");
 
     // 检测 bash 命令是否操作 cwd 之外路径的正则规则列表（强制触发 ASK，不可被 allow 名单绕过）
     private static final List<Pattern> OUTSIDE_CWD_PATTERNS = List.of(
@@ -224,22 +229,67 @@ public class AgentApprovalManager {
     }
 
     /**
-     * 检查文件工具参数中的路径是否仍位于工作区内
+     * 检查文件工具参数中的路径是否仍位于工作区内。
+     *
+     * <p>Spring AI Alibaba 的文件工具（write_file / edit_file / read_file）用
+     * {@code @JsonProperty("file_path")} 暴露参数，因此这里必须按候选键取值；
+     * 解析失败或无法判定时返回 false（交人工审批），不再抛异常打断事件流。
      */
-    public boolean checkPathValid(String path) {
-        String filePath;
-        try {
-            JsonNode root = objectMapper.readTree(path);
-            filePath = root.path("filepath").asText();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-        if (filePath.isEmpty()) {
+    public boolean checkPathValid(String arguments) {
+        String filePath = extractFilePath(arguments);
+        if (filePath == null || filePath.isBlank()) {
             return false;
         }
-        Path basePath = Paths.get(agentContext.getWorkspace()).toAbsolutePath().normalize();
-        Path resolvedPath = basePath.resolve(filePath);
-        Path normalizedPath = resolvedPath.normalize();
-        return normalizedPath.startsWith(basePath);
+        Path basePath = workspaceRoot();
+        try {
+            Path normalizedPath = basePath.resolve(filePath).normalize();
+            return normalizedPath.startsWith(basePath);
+        } catch (Exception e) {
+            // 非法路径（含空字节等）一律不自动放行
+            return false;
+        }
+    }
+
+    /**
+     * 从工具参数 JSON 中取出文件路径，兼容不同工具/版本的键名。
+     *
+     * @return 路径字符串；无法解析时返回 null
+     */
+    public String extractFilePath(String arguments) {
+        if (arguments == null || arguments.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(arguments);
+            for (String key : FILE_PATH_KEYS) {
+                JsonNode node = root.get(key);
+                if (node != null && node.isTextual() && !node.asText().isBlank()) {
+                    return node.asText();
+                }
+            }
+            return null;
+        } catch (Exception e) {
+            // 参数不是合法 JSON：不抛给上层流，改为继续走人工审批
+            return null;
+        }
+    }
+
+    private Path workspaceRoot() {
+        String workspace = agentContext == null ? null : agentContext.getWorkspace();
+        if (workspace == null || workspace.isBlank()) {
+            workspace = System.getProperty("user.dir");
+        }
+        return Paths.get(workspace).toAbsolutePath().normalize();
+    }
+
+    /**
+     * 把尚未答复的审批项 id 序列化为 JSON 数组，供前端提示“还欠几个决定”。
+     */
+    public String toPendingIdsJson(Collection<String> ids) {
+        try {
+            return objectMapper.writeValueAsString(ids == null ? List.of() : new ArrayList<>(ids));
+        } catch (JsonProcessingException e) {
+            return "[]";
+        }
     }
 }

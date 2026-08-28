@@ -16,7 +16,9 @@ public record AgentStream(
         RESPONSE_FINISHED,
         TOOL_STREAMING,
         TOOL_FINISHED,
-        PERMISSION_REQUESTED
+        PERMISSION_REQUESTED,
+        /** 本轮仍有未答复的审批项，服务端已记录本次决定但暂不恢复执行 */
+        PERMISSION_PENDING
     }
 
 

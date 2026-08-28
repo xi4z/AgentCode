@@ -4,6 +4,7 @@ import com.agentcode.context.AgentContext;
 import com.agentcode.dto.AgentStream;
 import com.agentcode.factory.AgentSessionFactory;
 import com.agentcode.factory.SessionBuildOptions;
+import com.agentcode.properties.AgentCodeProperties;
 import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -60,7 +61,7 @@ class ModelCallLimitIntegrationTest {
             };
 
             AgentSessionFactory factory = new AgentSessionFactory(
-                    mock, new MemorySaver(), null);
+                    mock, new MemorySaver(), propertiesWithMaxSteps(10));
             AgentSession session = factory.create(context, SessionBuildOptions.builder()
                     .approvalTools(List.of())
                     .build());
@@ -69,11 +70,17 @@ class ModelCallLimitIntegrationTest {
                     .block(Duration.ofSeconds(20));
 
             assertThat(events).isNotNull();
-            // ModelCallLimitHook runLimit=10，达到限制后不应继续无限调用
+            // runLimit 取自 agentcode.agent.max-steps，达到限制后不应继续无限调用
             assertThat(modelCalls.get()).isLessThanOrEqualTo(10);
         } finally {
             deleteRecursively(workspace);
         }
+    }
+
+    private static AgentCodeProperties propertiesWithMaxSteps(int maxSteps) {
+        AgentCodeProperties properties = new AgentCodeProperties();
+        properties.getAgent().setMaxSteps(maxSteps);
+        return properties;
     }
 
     private void deleteRecursively(Path path) throws Exception {
