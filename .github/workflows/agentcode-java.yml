@@ -1,0 +1,156 @@
+name: AgentCode Java CI/CD
+
+on:
+  push:
+    branches: ["Java", "feat/**", "fix/**"]
+  pull_request:
+    branches: ["Java", "main"]
+  schedule:
+    - cron: "30 2 * * *"  # 每日 UTC 02:30 跑一次真实 LLM 回归
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agentcode-java-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MAVEN_OPTS: "-Dmaven.repo.local=${{ github.workspace }}/.m2"
+
+jobs:
+  quality-gate:
+    name: Build + Tests + Coverage + Metrics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache Maven repository
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      # 一次 mvn verify 同时产出：测试结果、JaCoCo 覆盖率（含门禁）、Checkstyle 报告
+      - name: Build & verify (JaCoCo gate ON)
+        run: mvn -B -ntp verify -Djacoco.check.haltonfailure=true
+
+      - name: Collect quantitative metrics
+        run: |
+          python3 scripts/collect_metrics.py
+          python3 scripts/validate_metrics.py
+
+      - name: Upload coverage & checkstyle reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-reports
+          path: |
+            target/site/jacoco
+            target/checkstyle-result.xml
+            target/surefire-reports
+            metrics/current.json
+          if-no-files-found: ignore
+
+  # 真实 LLM 回归只在手动/定时触发时跑，避免每个 PR 消耗外部 API 额度。
+  # 需要仓库 secret: DEEPSEEK_API_KEY
+  llm-regression:
+    name: Real-LLM Regression (deepseek, N=20)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    needs: quality-gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache Maven repository
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      - name: Require DEEPSEEK_API_KEY secret
+        env:
+          KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::secret DEEPSEEK_API_KEY 未配置，无法跑真实 LLM 回归"; exit 1;
+          fi
+
+      - name: Run benchmark against deepseek-chat
+        env:
+          OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_BASE_URL: https://api.deepseek.com
+          OPENAI_CHAT_MODEL: deepseek-chat
+          AI_MODEL_PROVIDER: openai
+          DASHSCOPE_API_KEY: dummy-not-used
+          SERVER_PORT: "18080"
+          AGENTCODE_AUDIT_ENABLED: "true"
+          LOG_FILE: ${{ github.workspace }}/bench.log
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bench-ws"
+          mvn -B -ntp test-compile
+          mvn -B -ntp spring-boot:run > "$RUNNER_TEMP/server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true; pkill -f com.agentcode.AgentCodeApplication 2>/dev/null || true' EXIT
+          # 等待就绪
+          ready=0
+          for i in $(seq 1 90); do
+            if curl -sS -m 2 -o /dev/null "http://127.0.0.1:18080/"; then ready=1; break; fi
+            kill -0 "$SERVER_PID" 2>/dev/null || { echo "server died"; tail -50 "$RUNNER_TEMP/server.log"; exit 1; }
+            sleep 1
+          done
+          [ "$ready" = "1" ] || { echo "server not ready"; tail -50 "$RUNNER_TEMP/server.log"; exit 1; }
+          node scripts/bench_client.mjs \
+            --ws ws://127.0.0.1:18080/ws/chat \
+            --workspace "$RUNNER_TEMP/bench-ws" \
+            --suite bench/suite.json --repeat 2 --gap-ms 800 --timeout-ms 90000 \
+            > "$RUNNER_TEMP/bench.out"
+          python3 scripts/bench_baseline.py --log "$LOG_FILE" --out "$RUNNER_TEMP/real_llm_baseline.new.json"
+
+      - name: Check regression vs committed golden
+        run: |
+          python3 scripts/check_regression.py \
+            --golden metrics/real_llm_baseline.json \
+            --candidate "$RUNNER_TEMP/real_llm_baseline.new.json"
+
+      - name: Upload regression artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-llm-regression
+          path: |
+            ${{ runner.temp }}/real_llm_baseline.new.json
+            ${{ runner.temp }}/bench.out
+            ${{ runner.temp }}/server.log
+          if-no-files-found: ignore

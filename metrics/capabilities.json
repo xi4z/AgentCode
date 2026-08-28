@@ -1,0 +1,233 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-28T17:20:00+08:00",
+  "project": "AgentCode/Java",
+  "purpose": "Java 分支与 Python 分支能力对齐矩阵；每个 Java 能力项必须能指向源码文件或测试作为证据。",
+  "capabilities": [
+    {
+      "id": "react_loop",
+      "name": "ReAct 循环（plan-act-observe）",
+      "category": "core_agent",
+      "java_status": "implemented",
+      "java_evidence": "src/main/java/com/agentcode/factory/AgentSessionFactory.java (ReactAgent)",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/loop.py"
+    },
+    {
+      "id": "multi_turn_session",
+      "name": "多轮会话状态与续跑",
+      "category": "session",
+      "java_status": "implemented",
+      "java_evidence": "src/main/java/com/agentcode/session/AgentSession.java",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/session/manager.py"
+    },
+    {
+      "id": "stream_events",
+      "name": "流式事件外化",
+      "category": "core_agent",
+      "java_status": "implemented",
+      "java_evidence": "src/main/java/com/agentcode/dto/AgentStream.java + websocket/ChatWebSocketHandler.java",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/events/bus.py + events/writer.py"
+    },
+    {
+      "id": "websocket_client_ui",
+      "name": "浏览器/WebSocket 实时 UI",
+      "category": "client",
+      "java_status": "implemented",
+      "java_evidence": "src/main/resources/static/index.html",
+      "python_status": "not_applicable",
+      "python_evidence": "Python 分支主前端是 TUI/CLI"
+    },
+    {
+      "id": "cli_client",
+      "name": "命令行客户端",
+      "category": "client",
+      "java_status": "partial",
+      "java_evidence": "scripts/terminal-chat.mjs（Node WebSocket 客户端，非 TCP CLI）",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/cli/"
+    },
+    {
+      "id": "tui_client",
+      "name": "TUI 客户端",
+      "category": "client",
+      "java_status": "not_implemented",
+      "java_evidence": "暂无 TUI；当前为 Web UI",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/tui/"
+    },
+    {
+      "id": "daemon_tcp_protocol",
+      "name": "常驻 daemon + JSON-RPC/NDJSON TCP 协议",
+      "category": "architecture",
+      "java_status": "not_implemented",
+      "java_evidence": "Java 是 Spring Boot 内嵌服务，未实现独立 daemon/TCP JSON-RPC",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/transport/socket_server.py + WIRE_PROTOCOL.md"
+    },
+    {
+      "id": "session_lifecycle",
+      "name": "创建/运行/停止/中断/恢复会话",
+      "category": "session",
+      "java_status": "implemented",
+      "java_evidence": "src/main/java/com/agentcode/service/Impl/ReActAgentServiceImpl.java + AgentSession.java",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/session/manager.py"
+    },
+    {
+      "id": "idle_eviction",
+      "name": "空闲会话回收",
+      "category": "session",
+      "java_status": "implemented",
+      "java_evidence": "src/main/java/com/agentcode/registry/AgentSessionRegistry.java + service/AgentSessionMaintenance.java",
+      "python_status": "partial",
+      "python_evidence": "会话锁/取消机制存在；未找到独立空闲回收可复用实现"
+    },
+    {
+      "id": "context_injection",
+      "name": "全局/项目上下文注入",
+      "category": "context",
+      "java_status": "implemented",
+      "java_evidence": "src/main/java/com/agentcode/context/AgentContext.java",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/memory/loader.py + runner.py"
+    },
+    {
+      "id": "session_notes",
+      "name": "会话笔记记忆",
+      "category": "context",
+      "java_status": "implemented",
+      "java_evidence": "src/main/java/com/agentcode/tools/SessionNoteTools.java",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/session/store.py + tools/builtin.py (NoteSaveTool)"
+    },
+    {
+      "id": "permission_approval",
+      "name": "工具权限审批（人工决策）",
+      "category": "safety",
+      "java_status": "implemented",
+      "java_evidence": "src/main/java/com/agentcode/dto/AgentApprovalManager.java + HumanInTheLoopHook",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/permissions/manager.py"
+    },
+    {
+      "id": "batch_multi_tool_approval",
+      "name": "一轮多工具/批量审批",
+      "category": "safety",
+      "java_status": "implemented",
+      "java_evidence": "AgentSession.handleAgentInterrupt + ChatWebSocketHandler handles 批量提交；AgentSessionMultiToolApprovalTest",
+      "python_status": "partial",
+      "python_evidence": "PermissionManager 按 tool_use_id 等待，未见批量 handles 协议"
+    },
+    {
+      "id": "approval_timeout",
+      "name": "审批超时回收",
+      "category": "safety",
+      "java_status": "implemented",
+      "java_evidence": "AgentSession.abandonStaleApproval + registry.abandonExpiredApprovalWaits",
+      "python_status": "implemented",
+      "python_evidence": "PermissionManager.check_and_wait asyncio.wait_for timeout"
+    },
+    {
+      "id": "command_safety_policy",
+      "name": "命令安全策略（safe/dangerous/allow/deny/越界）",
+      "category": "safety",
+      "java_status": "implemented",
+      "java_evidence": "src/main/java/com/agentcode/dto/ApprovalPolicy.java + common/ShellParseHelper.java",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/permissions/policy.py"
+    },
+    {
+      "id": "audit_logging",
+      "name": "运行审计日志",
+      "category": "observability",
+      "java_status": "implemented",
+      "java_evidence": "src/main/java/com/agentcode/audit/AuditedChatModel.java + AgentSession.logAgentRun",
+      "python_status": "partial",
+      "python_evidence": "Python 有事件日志/日志配置，但没有等价的 AUDIT_AGENT_RUN/AUDIT_AI_CALL 汇总"
+    },
+    {
+      "id": "token_control",
+      "name": "Token/步数控制（max-steps + summarization）",
+      "category": "core_agent",
+      "java_status": "implemented",
+      "java_evidence": "ModelCallLimitHook + SummarizationHook 配置于 AgentSessionFactory",
+      "python_status": "implemented",
+      "python_evidence": "AgentLoop max_steps + compact context_pct"
+    },
+    {
+      "id": "skills",
+      "name": "Skills 扩展",
+      "category": "extension",
+      "java_status": "partial",
+      "java_evidence": "SkillsAgentHook + FileSystemSkillRegistry 已挂载，但未见 Java 侧技能测试/文档",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/skills/loader.py"
+    },
+    {
+      "id": "subagents",
+      "name": "Subagent/后台任务",
+      "category": "extension",
+      "java_status": "not_implemented",
+      "java_evidence": "src/main 未发现 SpawnAgent/BackgroundTask 实现",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/subagent/registry.py + runner.py SpawnAgentTool"
+    },
+    {
+      "id": "mcp",
+      "name": "MCP 客户端/服务端",
+      "category": "extension",
+      "java_status": "partial",
+      "java_evidence": "application.yml 有 spring.ai.mcp.client.enabled 开关，未实现 MCP 工具注册/服务端",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/mcp/client.py + server.py"
+    },
+    {
+      "id": "compaction",
+      "name": "上下文压缩/摘要",
+      "category": "context",
+      "java_status": "partial",
+      "java_evidence": "SummarizationHook 会自动摘要；没有手动 compact 命令",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/compact/compactor.py + SessionCompactCommand"
+    },
+    {
+      "id": "trace_event_replay",
+      "name": "事件持久化与 trace 回放",
+      "category": "observability",
+      "java_status": "not_implemented",
+      "java_evidence": "Java 只有内存 WebSocket 事件流，无 events.jsonl/trace",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/events/writer.py + trace/writer.py + cli/commands/trace.py"
+    },
+    {
+      "id": "task_management",
+      "name": "任务管理工具",
+      "category": "extension",
+      "java_status": "not_implemented",
+      "java_evidence": "src/main 未发现 TaskManager/任务工具",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/task/manager.py + TaskCreate/TaskUpdate/TaskList/TaskGet"
+    },
+    {
+      "id": "persistence_store",
+      "name": "会话/消息持久化",
+      "category": "session",
+      "java_status": "partial",
+      "java_evidence": "store/InMemoryAgentContextStore + InMemorySessionNoteStore；待替换持久化",
+      "python_status": "implemented",
+      "python_evidence": "src/kama_claude/core/session/store.py"
+    },
+    {
+      "id": "health_metrics",
+      "name": "健康检查/运行指标端点",
+      "category": "observability",
+      "java_status": "implemented",
+      "java_evidence": "spring-boot-starter-actuator + management.endpoints 暴露 health,info,metrics",
+      "python_status": "not_implemented",
+      "python_evidence": "Python 未见等价 actuator"
+    }
+  ]
+}

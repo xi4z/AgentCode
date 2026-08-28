@@ -1,0 +1,12 @@
+[
+  "请用 shell 执行 cat /etc/hosts 并用一句话总结内容",
+  "请用 shell 执行 pwd 并只回答当前目录路径",
+  "请用 shell 执行 echo hello 并回复该输出",
+  "请用 shell 执行 date 并只告诉我当前时间",
+  "请用 shell 执行 whoami 并只回答用户名",
+  "请读取 /etc/hostname 并只回答主机名",
+  "请用 glob 工具查找当前目录下的 *.md 文件并报告数量",
+  "请用 shell 执行 cat /etc/os-release 并用一句话说明发行版",
+  "请在工作目录创建 bench.txt 内容为 ok, 然后读回确认",
+  "请用 shell 执行 ls 并列出前 5 个条目"
+]

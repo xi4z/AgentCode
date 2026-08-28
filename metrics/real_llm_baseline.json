@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-28T19:54:47.858028+08:00",
+  "models": [
+    "deepseek-chat"
+  ],
+  "sample": {
+    "total_runs": 20,
+    "successful_runs": 20,
+    "total_ai_calls": 44,
+    "total_segments": 39,
+    "unattributed_ai_events": 0,
+    "attribution": "runId_exact",
+    "window_fallback_count": 0,
+    "concurrency_safe": true
+  },
+  "metrics": {
+    "runtime.real.run_success_rate": {
+      "definition": "成功 run 数 / 总 run 数 * 100",
+      "numerator": 20,
+      "denominator": 20,
+      "value": 100.0,
+      "unit": "percent"
+    },
+    "runtime.real.run_duration_ms_p50": {
+      "definition": "每个逻辑 run 各段 durationMs 之和的 50 分位",
+      "numerator": "p50(sum_segment_duration)",
+      "denominator": "1",
+      "value": 3028,
+      "unit": "ms"
+    },
+    "runtime.real.run_duration_ms_p95": {
+      "definition": "每个逻辑 run 各段 durationMs 之和的 95 分位",
+      "numerator": "p95(sum_segment_duration)",
+      "denominator": "1",
+      "value": 6723,
+      "unit": "ms"
+    },
+    "runtime.real.ai_call_duration_ms_p50": {
+      "definition": "AUDIT_AI_STREAM durationMs 的 50 分位",
+      "numerator": "p50(ai_duration)",
+      "denominator": "1",
+      "value": 1139,
+      "unit": "ms"
+    },
+    "runtime.real.ai_call_duration_ms_p95": {
+      "definition": "AUDIT_AI_STREAM durationMs 的 95 分位",
+      "numerator": "p95(ai_duration)",
+      "denominator": "1",
+      "value": 1620,
+      "unit": "ms"
+    },
+    "runtime.real.tokens_per_run": {
+      "definition": "成功且有关联 AI 调用的 run 内 totalTokens 之和 / 该 run 数",
+      "numerator": 109679,
+      "denominator": 20,
+      "value": 5483.9,
+      "unit": "tokens/run"
+    },
+    "runtime.real.approval_per_run": {
+      "definition": "permissionRequests 之和 / 总 run 数",
+      "numerator": 6,
+      "denominator": 20,
+      "value": 0.3,
+      "unit": "count/run"
+    }
+  }
+}

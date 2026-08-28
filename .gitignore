@@ -59,3 +59,11 @@ out/
 build/
 dist/
 *.hprof
+
+# Python (metrics/bench tooling)
+__pycache__/
+*.pyc
+
+# Local benchmark scratch logs (never commit)
+*.bench.log
+.agentcode-bench*/
