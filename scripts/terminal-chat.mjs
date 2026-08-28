@@ -147,6 +147,17 @@ async function handleMessage(msg) {
             await handlePermission(msg);
             break;
 
+        case 'permission_pending': {
+            // 本轮还有其它工具在等审批，不能收尾
+            finishStreamLine();
+            let ids = [];
+            try {
+                ids = JSON.parse(msg.content || '[]');
+            } catch { /* ignore */ }
+            log(`🔐 已记录该决定，仍在等待 ${ids.length} 项审批`);
+            break;
+        }
+
         case 'done':
             finishStreamLine();
             log('✅ 本轮完成\n');

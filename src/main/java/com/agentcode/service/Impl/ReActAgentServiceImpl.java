@@ -50,9 +50,17 @@ public class ReActAgentServiceImpl implements ReactAgentService {
     }
 
     @Override
-    public Flux<AgentStream> handleInterrupt(AgentInterruptHandle handle) {
-        return agentSessionRegistry.get(handle.getRunId())
-                .handleAgentInterrupt(new AgentInterruptHandle[]{handle});
+    public Flux<AgentStream> handleInterrupt(String runId, AgentInterruptHandle... handles) {
+        AgentInterruptHandle[] submitted = handles == null ? new AgentInterruptHandle[0] : handles;
+        for (AgentInterruptHandle handle : submitted) {
+            if (handle == null) {
+                throw new IllegalArgumentException("审批决定不能为空");
+            }
+            if (runId != null && handle.getRunId() != null && !runId.equals(handle.getRunId())) {
+                throw new IllegalArgumentException("一次审批提交必须属于同一会话: " + runId + " != " + handle.getRunId());
+            }
+        }
+        return agentSessionRegistry.get(runId).handleAgentInterrupt(submitted);
     }
 
     @Override

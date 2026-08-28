@@ -385,6 +385,12 @@ function handleServerMessage(msg) {
             appendPermissionRequest(msg);
             break;
 
+        case 'permission_pending':
+            // 本轮还有其它工具在等审批：保持 busy，不收尾
+            finalizeStream();
+            appendMessage('system', '已记录该决定，仍在等待 ' + pendingCount(msg.content) + ' 项审批');
+            break;
+
         case 'done':
             finalizeStream();
             setBusy(false);
@@ -414,8 +420,17 @@ function handleServerMessage(msg) {
     }
 }
 
+function pendingCount(content) {
+    try {
+        const ids = JSON.parse(content || '[]');
+        return Array.isArray(ids) ? ids.length : 0;
+    } catch (e) {
+        return 0;
+    }
+}
+
 function appendAgentEvent(status, content) {
-    if (status === 'PERMISSION_REQUESTED') {
+    if (status === 'PERMISSION_REQUESTED' || status === 'PERMISSION_PENDING') {
         return;
     }
     if (status === 'TOOL_FINISHED') {

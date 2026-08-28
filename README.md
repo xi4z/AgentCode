@@ -72,8 +72,33 @@ http://localhost:8080/
 - 创建会话
 - 流式显示 Agent 事件
 - 多轮对话
-- 工具审批（批准 / 本会话全部批准 / 拒绝）
+- 工具审批（批准 / 本会话全部批准 / 拒绝 / 修改参数）
 - stop / interrupt
+
+#### 审批协议要点
+
+一轮中断可能同时挂起多个工具（例如两个 `shell` 调用），服务端会缓存决定，
+**等本轮待审批项全部答复后才恢复执行**：
+
+```jsonc
+// 服务端 -> 客户端：逐个列出待审批工具
+{"type": "permission_requested", "runId": "...", "toolCallId": "call_a", "toolName": "shell", "arguments": "{\"command\":\"cat /etc/hosts\"}"}
+
+// 客户端 -> 服务端：单个答复（兼容旧客户端）
+{"type": "permission_respond", "runId": "...", "toolCallId": "call_a", "decision": "APPROVED"}
+
+// 客户端 -> 服务端：批量答复（推荐，一次提交本轮全部决定）
+{"type": "permission_respond", "runId": "...", "handles": [
+  {"toolCallId": "call_a", "decision": "APPROVED"},
+  {"toolCallId": "call_b", "decision": "REJECTED", "feedback": "不要删文件"}
+]}
+
+// 服务端 -> 客户端：决定已记录，但本轮仍有未答复项（此时不会发 done）
+{"type": "permission_pending", "runId": "...", "content": "[\"call_b\"]"}
+```
+
+`decision` 可选 `APPROVED` / `APPROVE_ALL`（同一会话内该命令不再询问）/ `REJECTED` / `EDITED`（配 `arguments` 回传新参数）。
+等待审批期间 `stop` 会放弃本轮全部待审批工具调用并把会话置回空闲。
 
 ### 2. 终端多轮对话客户端
 
