@@ -20,7 +20,7 @@ public class AgentContext {
 
     final String runId;
     String goal;
-    final String workspace;
+    String workspace;
 
     /**
      * 全局上下文文件（用户级，支持 ~ 前缀）。

@@ -66,6 +66,12 @@ public class AgentCodeProperties {
         private Approval approval = new Approval();
 
         private Session session = new Session();
+
+        // 抵达最大 Token 时压缩上下文
+        private int maxTokensBeforeSummary;
+
+        // 在压缩后保持多少条消息, 即之后的全部压缩
+        private int messagesToKeep;
     }
 
     /** shell 静态评估名单，未配置的项沿用 {@code ApprovalPolicy} 内置默认 */

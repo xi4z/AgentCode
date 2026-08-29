@@ -8,7 +8,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Component
-public class InMemoryAgentContextStore {
+public class InMemoryAgentContextStore implements AgentContextStore {
     private final Map<String, AgentContext> store = new ConcurrentHashMap<>();
 
     public void save(String runId, AgentContext context) {

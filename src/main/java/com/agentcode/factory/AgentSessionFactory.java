@@ -8,6 +8,7 @@ import com.agentcode.session.AgentSession;
 import com.agentcode.session.AgentSessionRuntime;
 import com.agentcode.tools.SessionNoteTools;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
+import com.alibaba.cloud.ai.graph.agent.AgentTool;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.hook.Hook;
 import com.alibaba.cloud.ai.graph.agent.hook.hip.HumanInTheLoopHook;
@@ -44,6 +45,10 @@ public class AgentSessionFactory {
     private final ChatModel chatModel;
     private final BaseCheckpointSaver saver;
     private final AgentCodeProperties agentCodeProperties;
+    private final AgentHookBuilder agentHookBuilder;
+    private final AgentToolBuilder agentToolBuilder;
+
+
 
     public AgentSession create(AgentContext agentContext) {
         AgentCodeProperties.Agent agentConfig = agentConfig();
@@ -58,52 +63,36 @@ public class AgentSessionFactory {
         // 配置文件路径与模型步数来自 agentcode.agent.*，必须在拼接 system prompt 之前注入
         applyContextConfig(agentContext, agentConfig);
 
+        // 获取需要审批的工具名单并组装审批管理器
         List<String> approvalTools = options.getApprovalTools() == null
                 ? List.of()
                 : List.copyOf(options.getApprovalTools());
-        String systemPrompt = options.getSystemPrompt();
         AgentApprovalManager approvalManager = new AgentApprovalManager(
                 agentContext, ApprovalPolicy.from(agentConfig.getApproval()));
+
+        // 拼接提示词
+        String systemPrompt = options.getSystemPrompt();
         String workspace = resolveWorkspace(agentContext);
-        ShellTool2 shellTool2 = ShellTool2.builder(workspace).build();
 
-        List<Hook> hooks = new ArrayList<>(
-                List.of(
-                        ShellToolAgentHook.builder().shellTool2(shellTool2).shellToolName("shell").build(), // shell Hooks, 在审批前后防止 Shell 会话中断
-                        SummarizationHook.builder().model(chatModel).maxTokensBeforeSummary(4000).messagesToKeep(20).build(), // Token 成本控制
-                        ModelCallLimitHook.builder().runLimit(agentConfig.getMaxSteps()).build(), // 调用控制，取 agentcode.agent.max-steps
-                        SkillsAgentHook.builder().skillRegistry(FileSystemSkillRegistry.builder()
-                                .projectSkillsDirectory(workspace + "/skills")
-                                .build()).build() // Skill 侧控制
-                )
-        );
-
-        if (!approvalTools.isEmpty()) {
-            HumanInTheLoopHook.Builder hitlBuilder = HumanInTheLoopHook.builder();
-            // 需要人工审批的工具通过 HumanInTheLoopHook 在调用前中断
-            for (String tool : approvalTools) {
-                hitlBuilder.approvalOn(tool, ToolConfig.builder()
-                        .description("该工具调用需要人工审批")
-                        .build());
-            }
-            hooks.add(hitlBuilder.build());
-        }
 
         ReactAgent reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
                 .model(chatModel)
                 .systemPrompt(agentContext.systemPrompt(systemPrompt))
                 .saver(saver)
-                .tools(List.of(
-                        GrepSearchTool.builder(workspace).build(),
-                        GlobSearchTool.builder(workspace).build())
-                )
-                .methodTools(
-                        FileSystemTools.builder().rootDir(workspace).maxFileSizeMb(10).build(),
-                        new SessionNoteTools()
-                )
                 .toolContext(Map.of(SessionConfigKeys.AGENT_CONTEXT, agentContext))
-                .hooks(hooks)
+                .tools(
+                        agentToolBuilder.builder(agentContext).mainAgent().withSubAgent(this.createSubAgent(agentContext)).build()
+                )
+                .hooks(
+                        agentHookBuilder.builder(agentContext)
+                                .withModelCallLimit()
+                                .withSummarization()
+                                .withShellTool()
+                                .withApproval(approvalTools)
+                                .withSkills()
+                                .build()
+                )
                 .build();
 
         // 在重新 run 之后, 修改 context 状态
@@ -112,6 +101,7 @@ public class AgentSessionFactory {
                 .build();
         config.context().put(SessionConfigKeys.AGENT_CONTEXT, agentContext);
 
+        ShellTool2 shellTool2 = ShellTool2.builder(workspace).build();
         AgentSessionRuntime runtime = AgentSessionRuntime.builder()
                 .reactAgent(reactAgent)
                 .shellTool2(shellTool2)
@@ -122,6 +112,18 @@ public class AgentSessionFactory {
         return new AgentSession(agentContext, runtime);
     }
 
+    private ReactAgent createSubAgent(AgentContext agentContext) {
+        return ReactAgent.builder()
+                .name("sub_agent")
+                .model(chatModel)
+                .saver(saver)
+                .tools(agentToolBuilder.builder(agentContext).subAgent().build())
+                .hooks(agentHookBuilder.builder(agentContext)
+                        .withModelCallLimit()
+                        .withSummarization()
+                        .withSkills().build())
+                .build();
+    }
     /**
      * 需要人工审批的工具列表：优先 {@code agentcode.agent.approval-tools}，
      * 未配置时回落到 {@link SessionBuildOptions#DEFAULT_APPROVAL_TOOLS}。
@@ -163,7 +165,8 @@ public class AgentSessionFactory {
     private String resolveWorkspace(AgentContext agentContext) {
         String workspace = agentContext.getWorkspace();
         if (workspace == null || workspace.isBlank()) {
-            return System.getProperty("user.dir");
+            agentContext.setWorkspace(System.getProperty("user.dir"));
+            return workspace;
         }
         return workspace;
     }
