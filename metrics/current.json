@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "generated_at": "2026-08-28T20:12:27.693785+08:00",
+  "generated_at": "2026-08-29T11:00:15.536887+08:00",
   "project": "AgentCode/Java",
   "summary": {
     "surefire": {
@@ -210,7 +210,7 @@
       "unit": "count",
       "period": "per_build",
       "data_source": "target/checkstyle-result.xml",
-      "baseline": 14,
+      "baseline": 12,
       "current": 12,
       "target_value": 0,
       "target_direction": "errors_0_warnings_recorded",

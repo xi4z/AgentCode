@@ -54,11 +54,11 @@ mvn -o -Dmaven.repo.local=/path/to/.m2repo clean verify
 | `capability.parity_rate` | Java/Python 功能对齐率 | 68.75% | 68.75% | ≥80% (M1) | collected |
 | `quality.test_pass_rate` | Maven 测试通过率 | 100% | 100% | 100% | collected |
 | `quality.test_count` | 自动化测试用例数 | 65 | 39 | ≥60 (M1) | met |
-| `quality.line_coverage` | 行覆盖率（JaCoCo） | 70.27%（754/1073） | 70.27% | ≥70% (M1) | collected |
+| `quality.line_coverage` | 行覆盖率（JaCoCo） | 70.19%（756/1077） | 70.19% | ≥70% (M1) | collected |
 | `quality.branch_coverage` | 分支覆盖率（JaCoCo） | 56.70%（326/575） | 56.70% | ≥60% (M1) | below_target |
 | `quality.build_duration_ms` | 构建时长 | 无 | 无 | 不劣化基线 | baseline_pending |
 | `quality.flaky_rate` | 不稳定测试率 | 无 | 无 | ≤2% (M2) | baseline_pending |
-| `quality.static_issues` | 静态检查问题数（Checkstyle） | 14（0 error / 14 warn） | 14 | error=0 (M2) | collected |
+| `quality.static_issues` | 静态检查问题数（Checkstyle） | 12（0 error / 12 warn） | 12 | error=0 (M2) | collected |
 | `runtime.run_success_rate` | 任务成功率（真实 N=20） | 100% | 100% | ≥99% | collected (real) |
 | `runtime.run_duration_ms_p50` | 单轮 run 时延 p50（真实） | 3028ms | 3028ms | 不劣化基线 | collected (real) |
 | `runtime.run_duration_ms_p95` | 单轮 run 时延 p95（真实） | 6723ms | 6723ms | 不劣化基线 | collected (real) |
@@ -127,8 +127,8 @@ mvn -o -Dmaven.repo.local=/path/to/.m2repo clean verify
 
 ## 下一步（未实现项）
 
-- [x] `pom.xml` 增加 JaCoCo 插件并采集覆盖率基线（实测 line 70.27% / branch 56.70%，门禁阈值 0.65/0.50 但默认 `haltOnFailure=false`）。
-- [x] `pom.xml` 增加 Checkstyle（`config/checkstyle/checkstyle.xml`，非阻断，实测 0 error / 14 warning）。
+- [x] `pom.xml` 增加 JaCoCo 插件并采集覆盖率基线（实测 line 70.19% / branch 56.70%，门禁阈值 0.65/0.50 但默认 `haltOnFailure=false`）。
+- [x] `pom.xml` 增加 Checkstyle（`config/checkstyle/checkstyle.xml`，非阻断，实测 0 error / 12 warning）。
 - [x] 增加遍历 `DANGEROUS_COMMANDS`(13) / 越界模式(6) / 四种审批决策 的参数化测试 → `SafetyPolicyCoverageTest`（+26 用例，全绿）。
 - [x] 在 `AuditedChatModel` 流式路径回填真实 `promptTokens/completionTokens/totalTokens`（逐字段取最大值聚合）。
 - [x] 把 runId 透传进 `AUDIT_AI_STREAM`（`AgentSession` 的 Reactor `contextWrite` + `deferContextual` 读取），`tokens_per_run` 现支持并发精确关联。
