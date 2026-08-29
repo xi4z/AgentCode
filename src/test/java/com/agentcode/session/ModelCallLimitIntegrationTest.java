@@ -2,7 +2,9 @@ package com.agentcode.session;
 
 import com.agentcode.context.AgentContext;
 import com.agentcode.dto.AgentStream;
+import com.agentcode.factory.AgentHookBuilder;
 import com.agentcode.factory.AgentSessionFactory;
+import com.agentcode.factory.AgentToolBuilder;
 import com.agentcode.factory.SessionBuildOptions;
 import com.agentcode.properties.AgentCodeProperties;
 import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
@@ -60,8 +62,11 @@ class ModelCallLimitIntegrationTest {
                 }
             };
 
+            AgentCodeProperties properties = propertiesWithMaxSteps(10);
             AgentSessionFactory factory = new AgentSessionFactory(
-                    mock, new MemorySaver(), propertiesWithMaxSteps(10));
+                    mock, new MemorySaver(), properties,
+                    new AgentHookBuilder(mock, properties),
+                    new AgentToolBuilder(mock));
             AgentSession session = factory.create(context, SessionBuildOptions.builder()
                     .approvalTools(List.of())
                     .build());

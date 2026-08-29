@@ -3,8 +3,11 @@ package com.agentcode.agent;
 import com.agentcode.context.AgentContext;
 import com.agentcode.dto.AgentInterruptHandle;
 import com.agentcode.dto.AgentStream;
+import com.agentcode.factory.AgentHookBuilder;
 import com.agentcode.factory.AgentSessionFactory;
+import com.agentcode.factory.AgentToolBuilder;
 import com.agentcode.factory.SessionBuildOptions;
+import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.exception.InterruptFailException;
 import com.agentcode.session.AgentSession;
 import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
@@ -50,8 +53,12 @@ class AgentSessionMultiToolApprovalTest {
                     .workspace(workspace.toString())
                     .goal("并行读取两个系统文件")
                     .build();
+            TwoShellCallsThenDoneModel chatModel = new TwoShellCallsThenDoneModel();
+            AgentCodeProperties properties = new AgentCodeProperties();
             AgentSessionFactory factory = new AgentSessionFactory(
-                    new TwoShellCallsThenDoneModel(), new MemorySaver(), null);
+                    chatModel, new MemorySaver(), properties,
+                    new AgentHookBuilder(chatModel, properties),
+                    new AgentToolBuilder(chatModel));
             AgentSession session = factory.create(context, SessionBuildOptions.builder()
                     .approvalTools(List.of("shell"))
                     .build());
@@ -122,8 +129,12 @@ class AgentSessionMultiToolApprovalTest {
                     .workspace(workspace.toString())
                     .goal("读取系统文件")
                     .build();
+            TwoShellCallsThenDoneModel chatModel = new TwoShellCallsThenDoneModel();
+            AgentCodeProperties properties = new AgentCodeProperties();
             AgentSessionFactory factory = new AgentSessionFactory(
-                    new TwoShellCallsThenDoneModel(), new MemorySaver(), null);
+                    chatModel, new MemorySaver(), properties,
+                    new AgentHookBuilder(chatModel, properties),
+                    new AgentToolBuilder(chatModel));
             AgentSession session = factory.create(context, SessionBuildOptions.builder()
                     .approvalTools(List.of("shell"))
                     .build());
