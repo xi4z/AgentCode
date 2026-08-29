@@ -168,7 +168,7 @@ public class AgentSessionFactory {
         String workspace = agentContext.getWorkspace();
         if (workspace == null || workspace.isBlank()) {
             agentContext.setWorkspace(System.getProperty("user.dir"));
-            return workspace;
+            return agentContext.getWorkspace();
         }
         return workspace;
     }
