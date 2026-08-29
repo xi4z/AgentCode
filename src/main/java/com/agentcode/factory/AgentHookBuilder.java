@@ -11,6 +11,8 @@ import com.alibaba.cloud.ai.graph.agent.hook.skills.SkillsAgentHook;
 import com.alibaba.cloud.ai.graph.agent.hook.summarization.SummarizationHook;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.skills.registry.filesystem.FileSystemSkillRegistry;
+import lombok.AllArgsConstructor;
+import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Component;
@@ -104,8 +106,15 @@ public class AgentHookBuilder {
             return this;
         }
 
-        public List<Hook> build() {
-            return List.copyOf(hooks);
+        public Result build() {
+            return new Result(List.copyOf(hooks), shellTool2);
         }
+    }
+
+    @AllArgsConstructor
+    @Data
+    public static class Result{
+        private List<Hook> hooks;
+        private ShellTool2 shellTool2;
     }
 }

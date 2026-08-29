@@ -73,6 +73,13 @@ public class AgentSessionFactory {
         // 拼接提示词
         String systemPrompt = options.getSystemPrompt();
         String workspace = resolveWorkspace(agentContext);
+        AgentHookBuilder.Result result = agentHookBuilder.builder(agentContext)
+                .withModelCallLimit()
+                .withSummarization()
+                .withShellTool()
+                .withApproval(approvalTools)
+                .withSkills()
+                .build();
 
 
         ReactAgent reactAgent = ReactAgent.builder()
@@ -85,13 +92,7 @@ public class AgentSessionFactory {
                         agentToolBuilder.builder(agentContext).mainAgent().withSubAgent(this.createSubAgent(agentContext)).build()
                 )
                 .hooks(
-                        agentHookBuilder.builder(agentContext)
-                                .withModelCallLimit()
-                                .withSummarization()
-                                .withShellTool()
-                                .withApproval(approvalTools)
-                                .withSkills()
-                                .build()
+                    result.getHooks()
                 )
                 .build();
 
@@ -101,10 +102,10 @@ public class AgentSessionFactory {
                 .build();
         config.context().put(SessionConfigKeys.AGENT_CONTEXT, agentContext);
 
-        ShellTool2 shellTool2 = ShellTool2.builder(workspace).build();
+
         AgentSessionRuntime runtime = AgentSessionRuntime.builder()
                 .reactAgent(reactAgent)
-                .shellTool2(shellTool2)
+                .shellTool2(result.getShellTool2())
                 .approvalManager(approvalManager)
                 .initialConfig(config)
                 .build();
@@ -117,11 +118,12 @@ public class AgentSessionFactory {
                 .name("sub_agent")
                 .model(chatModel)
                 .saver(saver)
+                .description("Run an isolated sub-agent to handle a delegated sub-task.")
                 .tools(agentToolBuilder.builder(agentContext).subAgent().build())
                 .hooks(agentHookBuilder.builder(agentContext)
                         .withModelCallLimit()
                         .withSummarization()
-                        .withSkills().build())
+                        .withSkills().build().getHooks())
                 .build();
     }
     /**

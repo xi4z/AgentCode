@@ -54,12 +54,12 @@ public class AgentToolBuilder {
         public Builder subAgent(){
             this.withSearchTools();
             this.withFileSystemToolsOnlyRead();
-            this.withSessionNotesTools();
             return this;
         }
 
         public Builder withSubAgent(ReactAgent subAgent){
-            AgentTool.create(subAgent);
+            ToolCallback toolCallback = AgentTool.create(subAgent);
+            toolCallbacks.put(toolCallback.getToolDefinition().name(),toolCallback);
             return this;
         }
 
