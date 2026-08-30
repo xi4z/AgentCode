@@ -1,9 +1,10 @@
 package com.agentcode.entity;
 
-import com.baomidou.mybatisplus.annotation.IdType;
-import com.baomidou.mybatisplus.annotation.TableId;
-import com.baomidou.mybatisplus.annotation.TableName;
+import com.agentcode.vo.ContextVo;
+import com.baomidou.mybatisplus.annotation.*;
 import lombok.Data;
+
+import java.time.LocalDateTime;
 
 /**
  * Agent 上下文持久化实体。
@@ -23,4 +24,22 @@ public class Context {
     private String workspace;
 
     private String sessionNote;
+
+    @TableField(fill = FieldFill.INSERT)
+    private LocalDateTime createdAt;
+
+    @TableField(fill = FieldFill.INSERT_UPDATE)
+    private LocalDateTime updatedAt;
+
+
+    public ContextVo toVo(){
+        ContextVo vo = new ContextVo();
+        vo.setRunId(runId);
+        vo.setGoal(goal);
+        vo.setWorkspace(workspace);
+        vo.setCreateAt(createdAt);
+        vo.setUpdateAt(updatedAt);
+        return vo;
+    }
+
 }

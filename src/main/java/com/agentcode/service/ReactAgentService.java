@@ -2,7 +2,10 @@ package com.agentcode.service;
 
 import com.agentcode.dto.AgentInterruptHandle;
 import com.agentcode.vo.AgentStream;
+import com.agentcode.vo.ContextVo;
 import reactor.core.publisher.Flux;
+
+import java.util.List;
 
 /**
  * ReactAgent 会话服务：负责创建/运行会话、停止与引导，以及权限审批的恢复。
@@ -50,4 +53,6 @@ public interface ReactAgentService {
      * @param guidanceMessage
      */
     void interrupt(String runId, String guidanceMessage);
+
+    List<ContextVo> getRunIds();
 }

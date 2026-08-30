@@ -1,5 +1,6 @@
 package com.agentcode.agent;
 
+import com.agentcode.entity.Context;
 import lombok.*;
 
 import java.nio.file.Files;
@@ -18,9 +19,27 @@ public class AgentContext {
      * sessionNotes , workspace 由 model 注入
      */
 
-    final String runId;
-    String goal;
-    String workspace;
+    Context context;
+
+    public String getGoal() {
+        return context.getGoal();
+    }
+
+    public void setGoal(String goal) {
+        context.setGoal(goal);
+    }
+
+    public String getWorkspace() {
+        return context.getWorkspace();
+    }
+
+    public void setWorkspace(String workspace) {
+        context.setWorkspace(workspace);
+    }
+
+    public String getRunId() {
+        return context.getRunId();
+    }
 
     /**
      * 全局上下文文件（用户级，支持 ~ 前缀）。
@@ -37,15 +56,13 @@ public class AgentContext {
 
     StringBuilder sessionNotes = new StringBuilder(); // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
 
-    public AgentContext(String runId, String goal, String workspace, String globalContextFile) {
-        this.runId = runId;
-        this.goal = goal;
+    public AgentContext(Context context) {
+        String workspace = context.getWorkspace();
         if (workspace == null || workspace.isBlank()) {
-            this.workspace = System.getProperty("user.dir");
-        }else {
-            this.workspace = workspace;
+            context.setWorkspace(System.getProperty("user.dir"));
         }
-        this.globalContextFile = globalContextFile;
+        this.context = context;
+        this.sessionNotes.append(workspace);
     }
 
     /** 未配置时使用的项目上下文文件顺序 */
@@ -60,7 +77,7 @@ public class AgentContext {
             sb.append("\n\n## Global Context\n").append(globalContext);
         }
 
-        String projectContext = parseProjectContext(workspace);
+        String projectContext = parseProjectContext(context.getWorkspace());
         if (projectContext != null && !projectContext.isBlank()) {
             sb.append("\n\n## Project Context\n").append(projectContext);
         }

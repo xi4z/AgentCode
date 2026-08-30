@@ -110,6 +110,7 @@ public class AgentSession {
                 goal,
                 agentContext.getWorkspace()
         );
+        runConfig.context().put(SessionConfigKeys.AGENT_CONTEXT, agentContext); // 将 agentContext 丢入 Config 的 Context 中, 方便后续 Hook, Interceptor 和 Tool 的处理
         Disposable disposable;
         try {
             // 2. 启动内部 Agent，把事件转发到 sink

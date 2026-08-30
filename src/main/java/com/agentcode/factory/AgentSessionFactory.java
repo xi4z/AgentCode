@@ -64,6 +64,7 @@ public class AgentSessionFactory {
                 .withShellTool()
                 .withApproval(approvalTools)
                 .withSkills()
+                .withUpdateSessionNotes()
                 .build();
 
 

@@ -52,10 +52,7 @@ public class MySQLAgentContextStore implements AgentContextStore {
 
     private AgentContext toAgentContext(Context entity) {
         AgentContext context = new AgentContext(
-                entity.getRunId(),
-                entity.getGoal(),
-                entity.getWorkspace(),
-                null // 全局上下文文件路径由 AgentCodeProperties 在装配阶段注入
+                entity
         );
         if (entity.getSessionNote() != null) {
             context.setSessionNotes(new StringBuilder(entity.getSessionNote()));
