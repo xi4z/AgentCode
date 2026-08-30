@@ -47,7 +47,7 @@ public class AgentSessionFactory {
     private final AgentCodeProperties agentCodeProperties;
     private final AgentHookBuilder agentHookBuilder;
     private final AgentToolBuilder agentToolBuilder;
-
+    private final AgentInterceptorBuilder agentInterceptorBuilder;
 
 
     public AgentSession create(AgentContext agentContext) {
@@ -72,7 +72,6 @@ public class AgentSessionFactory {
 
         // 拼接提示词
         String systemPrompt = options.getSystemPrompt();
-        String workspace = resolveWorkspace(agentContext);
         AgentHookBuilder.Result result = agentHookBuilder.builder(agentContext)
                 .withModelCallLimit()
                 .withSummarization()
@@ -88,12 +87,9 @@ public class AgentSessionFactory {
                 .systemPrompt(agentContext.systemPrompt(systemPrompt))
                 .saver(saver)
                 .toolContext(Map.of(SessionConfigKeys.AGENT_CONTEXT, agentContext))
-                .tools(
-                        agentToolBuilder.builder(agentContext).mainAgent().withSubAgent(this.createSubAgent(agentContext)).build()
-                )
-                .hooks(
-                    result.getHooks()
-                )
+                .tools(agentToolBuilder.builder(agentContext).mainAgent().withSubAgent(this.createSubAgent(agentContext)).build())
+                .hooks(result.getHooks())
+                .interceptors(agentInterceptorBuilder.builder(agentContext).withTodoList().build())
                 .build();
 
         // 在重新 run 之后, 修改 context 状态
@@ -164,12 +160,5 @@ public class AgentSessionFactory {
         }
     }
 
-    private String resolveWorkspace(AgentContext agentContext) {
-        String workspace = agentContext.getWorkspace();
-        if (workspace == null || workspace.isBlank()) {
-            agentContext.setWorkspace(System.getProperty("user.dir"));
-            return agentContext.getWorkspace();
-        }
-        return workspace;
-    }
+
 }

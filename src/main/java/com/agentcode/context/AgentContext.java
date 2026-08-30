@@ -8,8 +8,8 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
-@Data
-@Builder
+@Getter
+@Setter
 public class AgentContext {
     /**
      * AgentContext 流程:
@@ -33,11 +33,20 @@ public class AgentContext {
      * 由 {@code AgentCodeProperties.Agent#projectContextFile} 注入到列表首位，
      * 后面保留 .kama/context.md 与 AGENT.md/CLAUDE.md/SOUL.md 兜底。
      */
-    @Builder.Default
     List<String> projectContextFiles = new ArrayList<>(DEFAULT_PROJECT_CONTEXT_FILES);
 
-    @Builder.Default
     StringBuilder sessionNotes = new StringBuilder(); // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
+
+    public AgentContext(String runId, String goal, String workspace, String globalContextFile) {
+        this.runId = runId;
+        this.goal = goal;
+        if (workspace == null || workspace.isBlank()) {
+            this.workspace = System.getProperty("user.dir");
+        }else {
+            this.workspace = workspace;
+        }
+        this.globalContextFile = globalContextFile;
+    }
 
     /** 未配置时使用的项目上下文文件顺序 */
     public static final List<String> DEFAULT_PROJECT_CONTEXT_FILES = List.of(
