@@ -54,13 +54,13 @@ Java/
     │   │   ├── registry/              # AgentSessionRegistry：活跃会话表 + 空闲回收
     │   │   ├── service/               # ReactAgentService 与 AgentSessionMaintenance（定时清理）
     │   │   ├── session/               # AgentSession：run/stop/interrupt/审批恢复状态机
-    │   │   ├── store/                 # InMemoryAgentContextStore（待替换为持久化实现）
+    │   │   ├── store/                 # MySQLAgentContextStore（MyBatis Plus 持久化实现）
     │   │   ├── tools/                 # SessionNoteTools 等本地工具
     │   │   ├── utils/                 # SpringContextUtil
     │   │   └── websocket/             # /ws/chat 协议与处理器、静态页面路由
     │   └── resources/
     │       ├── application.yml
-    │       └── static/index.html      # 浏览器 Web UI
+    │       └── static/index.html      # 浏览器 TUI（类终端/类 Claude Code）
     └── test/java/com/agentcode/       # 对应模块测试
 ```
 
@@ -70,6 +70,8 @@ Java/
 - Spring Boot 3.5.x
 - Spring AI Alibaba 1.1.2.0
 - Spring AI 1.1.2
+- MyBatis Plus 3.5.x
+- MySQL
 - Maven
 
 ## 常用命令
@@ -79,6 +81,17 @@ mvn clean compile
 mvn test
 mvn spring-boot:run
 ```
+
+## MySQL 初始化
+
+默认使用 MySQL 持久化 AgentContext，请先创建数据库：
+
+```sql
+CREATE DATABASE IF NOT EXISTS agentcode DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+应用启动时会自动执行 `src/main/resources/schema.sql` 创建 `agent_context` 表。
+连接信息可通过 `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` 等环境变量覆盖，默认值见 `application.yml`。
 
 ## 前端入口
 
@@ -90,12 +103,14 @@ mvn spring-boot:run
 http://localhost:8080/
 ```
 
-页面会通过 `/ws/chat` 建立 WebSocket 连接，支持：
-- 创建会话
-- 流式显示 Agent 事件
-- 多轮对话
-- 工具审批（批准 / 本会话全部批准 / 拒绝 / 修改参数）
+页面会通过 `/ws/chat` 建立 WebSocket 连接，以类终端/类 Claude Code 的 TUI 形式支持：
+- 直接输入目标创建会话，之后输入内容进行多轮对话
+- 流式显示 Agent 事件（思考、回复、工具）
+- 工具审批（批准 / 本会话全部批准 / 拒绝 / 编辑参数）
 - stop / interrupt
+- `/help`、`/workspace`、`/new`、`/clear`、`/approve` 等命令
+- 输入 `/` 自动进入命令补全模式，`Tab` 循环补全
+- 断线自动重连
 
 #### 审批协议要点
 

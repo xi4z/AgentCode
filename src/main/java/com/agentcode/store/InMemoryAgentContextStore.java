@@ -1,13 +1,11 @@
 package com.agentcode.store;
 
 import com.agentcode.agent.AgentContext;
-import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
-@Component
 public class InMemoryAgentContextStore implements AgentContextStore {
     private final Map<String, AgentContext> store = new ConcurrentHashMap<>();
 

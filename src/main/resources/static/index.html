@@ -3,609 +3,996 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AgentCode Java Chat</title>
+<title>AgentCode TUI</title>
 <style>
     :root {
-        --bg: #f5f6fa;
-        --panel: #ffffff;
-        --border: #d9dee8;
-        --primary: #3b82f6;
-        --primary-hover: #2563eb;
-        --danger: #dc2626;
-        --success: #16a34a;
-        --text: #1f2937;
-        --muted: #6b7280;
+        --bg: #0b0f14;
+        --bg-alt: #0f151c;
+        --border: #1e2a38;
+        --text: #d4dbe2;
+        --muted: #5f7485;
+        --green: #4ade80;
+        --cyan: #22d3ee;
+        --yellow: #facc15;
+        --red: #f87171;
+        --blue: #60a5fa;
+        --purple: #c084fc;
     }
+
     * { box-sizing: border-box; }
-    body {
+
+    html, body {
         margin: 0;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        height: 100%;
         background: var(--bg);
         color: var(--text);
-        height: 100vh;
-        display: flex;
-        justify-content: center;
-        align-items: center;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Courier New", monospace;
+        font-size: 14px;
     }
-    .app {
-        width: min(960px, 96vw);
-        height: min(760px, 94vh);
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        box-shadow: 0 10px 30px rgba(0,0,0,.08);
+
+    #tui {
         display: flex;
         flex-direction: column;
-        overflow: hidden;
+        height: 100vh;
+        max-width: 1200px;
+        margin: 0 auto;
+        border-left: 1px solid var(--border);
+        border-right: 1px solid var(--border);
+        background: var(--bg);
     }
-    header {
-        padding: 14px 18px;
-        border-bottom: 1px solid var(--border);
+
+    #titlebar {
         display: flex;
         align-items: center;
-        gap: 12px;
-        flex-wrap: wrap;
+        gap: 10px;
+        padding: 8px 14px;
+        background: var(--bg-alt);
+        border-bottom: 1px solid var(--border);
+        color: var(--muted);
+        user-select: none;
+        flex-shrink: 0;
     }
-    header h1 { font-size: 18px; margin: 0; }
-    .run-badge {
+    #titlebar .title {
+        color: var(--green);
+        font-weight: bold;
+        letter-spacing: .4px;
+    }
+    #titlebar .dot {
+        color: var(--green);
+    }
+    #titlebar .status {
+        margin-left: auto;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: .8px;
+    }
+    #titlebar .status.connected { color: var(--green); }
+    #titlebar .status.running  { color: var(--cyan); }
+    #titlebar .status.waiting  { color: var(--yellow); }
+    #titlebar .status.error    { color: var(--red); }
+    #titlebar .status.connecting { color: var(--yellow); }
+    #titlebar .shortcut {
         font-size: 12px;
         color: var(--muted);
-        background: #eef2ff;
-        padding: 3px 8px;
-        border-radius: 999px;
-    }
-    .header-actions { margin-left: auto; display: flex; gap: 8px; }
-    button {
-        border: 0;
-        border-radius: 8px;
-        padding: 8px 14px;
-        font-size: 14px;
-        cursor: pointer;
-        transition: background .15s;
-    }
-    button.primary { background: var(--primary); color: #fff; }
-    button.primary:hover { background: var(--primary-hover); }
-    button.secondary { background: #eef2ff; color: var(--primary); }
-    button.secondary:hover { background: #e0e7ff; }
-    button.danger { background: #fee2e2; color: var(--danger); }
-    button.danger:hover { background: #fecaca; }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-    .session-box {
-        padding: 14px 18px;
-        border-bottom: 1px solid var(--border);
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-    }
-    .row { display: flex; gap: 8px; }
-    input[type="text"], textarea {
-        width: 100%;
         border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 9px 10px;
-        font-size: 14px;
-        font-family: inherit;
-        resize: none;
+        padding: 2px 7px;
+        border-radius: 4px;
     }
-    textarea { min-height: 52px; }
-    #log {
+
+    #terminal {
         flex: 1;
         overflow-y: auto;
-        padding: 16px 18px;
-        background: #fafbff;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-    }
-    .msg {
-        max-width: 85%;
-        padding: 9px 12px;
-        border-radius: 10px;
-        line-height: 1.5;
-        white-space: pre-wrap;
+        padding: 12px 14px 20px;
+        line-height: 1.6;
+        scrollbar-width: thin;
+        scrollbar-color: var(--border) transparent;
         word-break: break-word;
-        font-size: 14px;
     }
-    .msg.user { align-self: flex-end; background: #dbeafe; }
-    .msg.assistant { align-self: flex-start; background: #ffffff; border: 1px solid var(--border); }
-    .msg.system { align-self: center; color: var(--muted); font-size: 12px; background: none; }
-    .msg.tool { align-self: flex-start; background: #f3f4f6; border: 1px solid var(--border); color: #374151; }
-    .msg.permission {
-        align-self: center;
-        background: #fef3c7;
-        border: 1px solid #fbbf24;
-        color: #78350f;
-        text-align: center;
+    #terminal::-webkit-scrollbar { width: 8px; }
+    #terminal::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    .line {
+        white-space: pre-wrap;
+        margin-bottom: 2px;
+        min-height: 1em;
     }
-    .msg.markdown { white-space: normal; word-break: normal; }
-    .msg.markdown p { margin: 4px 0; }
-    .msg.markdown h1, .msg.markdown h2, .msg.markdown h3,
-    .msg.markdown h4, .msg.markdown h5, .msg.markdown h6 { margin: 6px 0 4px; }
-    .msg.markdown ul, .msg.markdown ol { margin: 4px 0; padding-left: 22px; }
-    .msg.markdown pre {
-        background: #1f2937;
-        color: #f9fafb;
+    .line.user { color: var(--text); }
+    .line.user::before { content: "❯ "; color: var(--green); }
+    .line.assistant { color: var(--text); }
+    .line.assistant::before { content: "▍"; color: var(--blue); }
+    .line.thinking { color: var(--muted); font-style: italic; }
+    .line.thinking::before { content: "💭 "; color: var(--muted); }
+    .line.tool { color: var(--cyan); }
+    .line.tool::before { content: "🔧 "; color: var(--cyan); }
+    .line.system { color: var(--muted); }
+    .line.system::before { content: "• "; color: var(--muted); }
+    .line.error { color: var(--red); }
+    .line.error::before { content: "✗ "; color: var(--red); }
+    .line.success { color: var(--green); }
+    .line.success::before { content: "✓ "; color: var(--green); }
+
+    .line.permission {
+        margin: 8px 0;
         padding: 10px 12px;
-        border-radius: 8px;
-        overflow-x: auto;
-        margin: 6px 0;
+        border: 1px solid #4d3e00;
+        background: #151205;
+        color: var(--yellow);
+        border-radius: 6px;
     }
-    .msg.markdown pre code { background: transparent; padding: 0; color: inherit; }
-    .msg.markdown code {
-        background: #eef2ff;
-        color: #3730a3;
-        padding: 1px 5px;
+    .line.permission .perm-title { color: var(--yellow); font-weight: bold; }
+    .line.permission .perm-meta { color: var(--text); }
+    .line.permission .perm-args {
+        display: block;
+        margin: 4px 0 8px;
+        padding: 6px 8px;
+        background: #0a0e12;
+        border: 1px solid var(--border);
+        color: #bbf7d0;
         border-radius: 4px;
+        white-space: pre-wrap;
         font-size: 13px;
     }
-    .msg.markdown a { color: var(--primary); text-decoration: underline; }
-    .permission-actions { display: flex; gap: 6px; margin-top: 8px; }
-    footer {
-        border-top: 1px solid var(--border);
-        padding: 12px 18px;
-        display: flex;
-        gap: 8px;
-        align-items: flex-end;
+    .perm-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+    .perm-actions .key {
+        cursor: pointer;
+        display: inline-block;
+        padding: 4px 10px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--bg-alt);
+        color: var(--text);
+        font-family: inherit;
+        font-size: 13px;
+        user-select: none;
     }
-    footer textarea { flex: 1; }
+    .perm-actions .key:hover { border-color: var(--cyan); color: var(--cyan); }
+    .perm-actions .key.approve { border-color: #14532d; color: var(--green); }
+    .perm-actions .key.approve:hover { background: rgba(74,222,128,.08); }
+    .perm-actions .key.reject { border-color: #7f1d1d; color: var(--red); }
+    .perm-actions .key.reject:hover { background: rgba(248,113,113,.08); }
+    .perm-actions .key[disabled] { opacity: .4; cursor: not-allowed; }
+    .line.permission.resolved { opacity: .55; }
+    .line.permission.resolved .perm-actions { display: none; }
+
+    #inputline {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        background: var(--bg-alt);
+        border-top: 1px solid var(--border);
+        flex-shrink: 0;
+    }
+    #prompt {
+        color: var(--green);
+        white-space: nowrap;
+    }
+    #prompt .workspace {
+        color: var(--muted);
+        margin-left: 2px;
+    }
+    #cli {
+        flex: 1;
+        background: transparent;
+        border: 0;
+        outline: 0;
+        color: var(--text);
+        font-family: inherit;
+        font-size: 14px;
+        caret-color: var(--green);
+    }
+    #cli::placeholder { color: var(--muted); }
+
+    #completion {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 10px;
+        padding: 6px 14px 8px;
+        background: #0d131a;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 13px;
+        max-height: 150px;
+        overflow-y: auto;
+        flex-shrink: 0;
+    }
+    #completion[hidden] { display: none; }
+    #completion .completion-hint {
+        width: 100%;
+        color: var(--muted);
+        font-size: 12px;
+        user-select: none;
+    }
+    #completion .completion-item {
+        cursor: pointer;
+        padding: 1px 7px;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        color: var(--text);
+        white-space: nowrap;
+        user-select: none;
+    }
+    #completion .completion-item:hover {
+        border-color: var(--border);
+        color: var(--text);
+    }
+    #completion .completion-item.active {
+        border-color: var(--cyan);
+        color: var(--cyan);
+        background: rgba(34, 211, 238, .08);
+    }
+
     @media (max-width: 600px) {
-        .app { height: 100vh; width: 100vw; border-radius: 0; }
+        #tui { border-left: 0; border-right: 0; }
+        #titlebar .shortcut { display: none; }
     }
 </style>
 </head>
 <body>
-<div class="app">
-    <header>
-        <h1>AgentCode Java Chat</h1>
-        <span class="run-badge" id="runBadge">未开始会话</span>
-        <div class="header-actions">
-            <button class="secondary" id="interruptBtn" disabled>Interrupt</button>
-            <button class="danger" id="stopBtn" disabled>Stop</button>
-        </div>
-    </header>
-
-    <div class="session-box">
-        <div class="row">
-            <input type="text" id="workspace" placeholder="工作区路径, 例如 /tmp 或当前项目路径" value="/tmp">
-            <button class="primary" id="startBtn">开始会话</button>
-        </div>
-        <textarea id="goal" placeholder="输入本轮目标, 例如: 列出当前目录下的文件"></textarea>
+<div id="tui">
+    <div id="titlebar">
+        <span class="dot">●</span>
+        <span class="title">AgentCode TUI</span>
+        <span class="status" id="statusText">CONNECTING</span>
+        <span class="shortcut">/help</span>
+        <span class="shortcut">Ctrl+L 清屏</span>
     </div>
 
-    <div id="log"></div>
+    <div id="terminal" role="log" aria-live="polite"></div>
 
-    <footer>
-        <textarea id="chatInput" placeholder="进行多轮对话..." disabled></textarea>
-        <button class="primary" id="sendBtn" disabled>发送</button>
-    </footer>
+    <div id="completion" hidden></div>
+
+    <div id="inputline">
+        <span id="prompt">agentcode❯<span class="workspace" id="workspaceText">/tmp</span></span>
+        <input id="cli" type="text" autocomplete="off" spellcheck="false" autofocus
+               placeholder="输入目标开始新会话；已有会话时输入消息继续对话。 /help 查看命令">
+    </div>
 </div>
 
 <script>
-const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/chat';
-let ws = null;
-let runId = null;
-let busy = false;
-let permissions = new Map();
-let streamBlock = null;
-let streamKind = null;
-let streamRaw = '';
+(function () {
+    'use strict';
 
-const log = document.getElementById('log');
-const runBadge = document.getElementById('runBadge');
-const startBtn = document.getElementById('startBtn');
-const interruptBtn = document.getElementById('interruptBtn');
-const stopBtn = document.getElementById('stopBtn');
-const sendBtn = document.getElementById('sendBtn');
-const chatInput = document.getElementById('chatInput');
+    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/chat';
 
-function escapeHtml(text) {
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
+    // ---- state ----
+    let ws = null;
+    let reconnectTimer = null;
+    let manualClose = false;
+    let runId = null;
+    let busy = false;
+    let workspace = '/tmp';
+    let pending = new Map();      // toolCallId -> permission message
+    let streamLine = null;
+    let streamKind = null;
 
-function renderInlineMarkdown(text) {
-    let html = escapeHtml(text);
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
-    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
-        '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-    return html;
-}
+    // 可补全的斜杠命令（TUI 命令补全模式）
+    const COMMANDS = [
+        '/approve',
+        '/approve_all',
+        '/clear',
+        '/goal',
+        '/help',
+        '/interrupt',
+        '/new',
+        '/reject',
+        '/status',
+        '/stop',
+        '/workspace'
+    ];
+    let completionMatches = [];
+    let completionIndex = -1;
+    let completionLastInput = '';
 
-function renderMarkdown(text) {
-    if (!text) return '';
-    const lines = text.split('\n');
-    let html = '';
-    let inCode = false;
-    let codeLang = '';
-    let codeBuf = [];
-    let listType = null;
-    let paragraph = [];
+    // ---- DOM ----
+    const terminal = document.getElementById('terminal');
+    const statusText = document.getElementById('statusText');
+    const workspaceText = document.getElementById('workspaceText');
+    const cli = document.getElementById('cli');
+    const prompt = document.getElementById('prompt');
+    const completionBox = document.getElementById('completion');
 
-    const flushParagraph = () => {
-        if (paragraph.length) {
-            html += '<p>' + renderInlineMarkdown(paragraph.join(' ')).replace(/\n/g, '<br>') + '</p>';
-            paragraph = [];
-        }
-    };
-    const flushList = () => {
-        if (listType) {
-            html += '</' + listType + '>';
-            listType = null;
-        }
-    };
-
-    for (const line of lines) {
-        if (line.trim().startsWith('```')) {
-            if (inCode) {
-                html += '<pre><code' + (codeLang ? ' class="language-' + escapeHtml(codeLang) + '"' : '') + '>'
-                    + escapeHtml(codeBuf.join('\n')) + '</code></pre>';
-                inCode = false;
-                codeLang = '';
-                codeBuf = [];
-            } else {
-                flushParagraph();
-                flushList();
-                inCode = true;
-                codeLang = line.trim().slice(3).trim();
-            }
-            continue;
-        }
-        if (inCode) {
-            codeBuf.push(line);
-            continue;
-        }
-
-        const heading = line.match(/^(#{1,6})\s+(.*)$/);
-        if (heading) {
-            flushParagraph();
-            flushList();
-            const level = heading[1].length;
-            html += '<h' + level + '>' + renderInlineMarkdown(heading[2]) + '</h' + level + '>';
-            continue;
-        }
-
-        const ul = line.match(/^\s*[-*]\s+(.*)$/);
-        if (ul) {
-            flushParagraph();
-            if (listType !== 'ul') {
-                flushList();
-                html += '<ul>';
-                listType = 'ul';
-            }
-            html += '<li>' + renderInlineMarkdown(ul[1]) + '</li>';
-            continue;
-        }
-
-        const ol = line.match(/^\s*\d+\.\s+(.*)$/);
-        if (ol) {
-            flushParagraph();
-            if (listType !== 'ol') {
-                flushList();
-                html += '<ol>';
-                listType = 'ol';
-            }
-            html += '<li>' + renderInlineMarkdown(ol[1]) + '</li>';
-            continue;
-        }
-
-        if (line.trim() === '') {
-            flushParagraph();
-            flushList();
-            continue;
-        }
-
-        paragraph.push(line.trim());
+    function updateWorkspaceLabel() {
+        workspaceText.textContent = ' ' + workspace;
     }
 
-    if (inCode && codeBuf.length) {
-        html += '<pre><code>' + escapeHtml(codeBuf.join('\n')) + '</code></pre>';
-    }
-    flushParagraph();
-    flushList();
-    return html;
-}
-
-function appendMessage(kind, text, options) {
-    options = options || {};
-    const div = document.createElement('div');
-    div.className = 'msg ' + kind + (options.markdown ? ' markdown' : '');
-    if (text !== undefined && text !== null) {
-        if (options.markdown) {
-            div.innerHTML = renderMarkdown(text);
+    function updateStatus() {
+        const connected = ws && ws.readyState === WebSocket.OPEN;
+        if (!connected) {
+            statusText.textContent = 'DISCONNECTED';
+            statusText.className = 'status error';
+            return;
+        }
+        if (pending.size > 0) {
+            statusText.textContent = 'WAITING APPROVAL ×' + pending.size;
+            statusText.className = 'status waiting';
+            return;
+        }
+        if (busy) {
+            statusText.textContent = 'RUNNING';
+            statusText.className = 'status running';
+            return;
+        }
+        if (runId) {
+            statusText.textContent = 'IDLE · ' + shortId(runId);
+            statusText.className = 'status connected';
         } else {
-            div.textContent = text;
+            statusText.textContent = 'READY';
+            statusText.className = 'status connected';
         }
     }
-    log.appendChild(div);
-    log.scrollTop = log.scrollHeight;
-    return div;
-}
 
-function finalizeStream() {
-    streamBlock = null;
-    streamKind = null;
-    streamRaw = '';
-}
-
-function setBusy(value) {
-    busy = value;
-    sendBtn.disabled = !value || !runId;
-    chatInput.disabled = !value || !runId;
-    interruptBtn.disabled = !value || !runId;
-    stopBtn.disabled = !value || !runId;
-    startBtn.disabled = value;
-}
-
-function connect() {
-    ws = new WebSocket(wsUrl);
-    ws.onopen = () => {
-        appendMessage('system', 'WebSocket 已连接: ' + wsUrl);
-    };
-    ws.onclose = () => {
-        appendMessage('system', 'WebSocket 连接已断开');
-        setBusy(false);
-        startBtn.disabled = false;
-    };
-    ws.onerror = () => appendMessage('system', 'WebSocket 出错');
-    ws.onmessage = (event) => handleServerMessage(JSON.parse(event.data));
-}
-
-function send(obj) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(obj));
+    function shortId(id) {
+        if (!id) return '';
+        return id.length > 12 ? id.slice(0, 8) + '…' + id.slice(-4) : id;
     }
-}
 
-function nextRequestId() {
-    return 'r' + Date.now() + '-' + Math.random().toString(16).slice(2, 8);
-}
-
-function handleServerMessage(msg) {
-    switch (msg.type) {
-        case 'session_started':
-            runId = msg.runId;
-            runBadge.textContent = '会话: ' + runId;
-            appendMessage('system', '会话已创建: ' + runId);
-            appendMessage('assistant', '会话创建成功，开始执行目标...');
-            break;
-
-        case 'agent_event':
-            appendAgentEvent(msg.status, msg.content);
-            break;
-
-        case 'permission_requested':
-            finalizeStream();
-            permissions.set(msg.toolCallId, msg);
-            appendPermissionRequest(msg);
-            break;
-
-        case 'permission_pending':
-            // 本轮还有其它工具在等审批：保持 busy，不收尾
-            finalizeStream();
-            appendMessage('system', '已记录该决定，仍在等待 ' + pendingCount(msg.content) + ' 项审批');
-            break;
-
-        case 'done':
-            finalizeStream();
-            setBusy(false);
-            appendMessage('system', '本轮完成');
-            break;
-
-        case 'error':
-            finalizeStream();
-            setBusy(false);
-            appendMessage('system', '错误: ' + msg.message);
-            break;
-
-        case 'stopped':
-            finalizeStream();
-            setBusy(false);
-            appendMessage('system', '已停止');
-            break;
-
-        case 'interrupted':
-            finalizeStream();
-            setBusy(false);
-            appendMessage('system', '已中断: ' + msg.message);
-            break;
-
-        default:
-            appendMessage('system', '未知消息: ' + JSON.stringify(msg));
+    function scrollToBottom() {
+        terminal.scrollTop = terminal.scrollHeight;
     }
-}
 
-function pendingCount(content) {
-    try {
-        const ids = JSON.parse(content || '[]');
-        return Array.isArray(ids) ? ids.length : 0;
-    } catch (e) {
-        return 0;
+    function escapeHtml(text) {
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
-}
 
-function appendAgentEvent(status, content) {
-    if (status === 'PERMISSION_REQUESTED' || status === 'PERMISSION_PENDING') {
-        return;
+    function prettyJson(text) {
+        if (!text) return '';
+        try {
+            return JSON.stringify(JSON.parse(text), null, 2);
+        } catch (e) {
+            return text;
+        }
     }
-    if (status === 'TOOL_FINISHED') {
-        appendMessage('tool', '[工具执行完成]');
-        return;
+
+    // append a non-streaming line into terminal
+    function writeLine(kind, text) {
+        finishStream();
+        const div = document.createElement('div');
+        div.className = 'line ' + kind;
+        div.textContent = text == null ? '' : String(text);
+        terminal.appendChild(div);
+        scrollToBottom();
+        return div;
     }
-    if (status === 'THINKING_STREAMING' || status === 'RESPONSE_STREAMING') {
-        const kind = status === 'THINKING_STREAMING' ? 'thinking' : 'response';
-        if (streamBlock && streamKind === kind) {
-            streamRaw += content || '';
-            streamBlock.innerHTML = renderMarkdown(streamRaw);
+
+    // streaming sections (thinking/response) update one line until the matching *_FINISHED event
+    function writeStream(kind, text) {
+        if (streamLine && streamLine.dataset.kind === kind) {
+            streamLine.textContent += text == null ? '' : String(text);
         } else {
-            streamRaw = content || '';
-            streamBlock = appendMessage('assistant', streamRaw, {markdown: true});
+            finishStream();
+            const div = document.createElement('div');
+            div.className = 'line ' + kind;
+            div.dataset.kind = kind;
+            div.textContent = text == null ? '' : String(text);
+            terminal.appendChild(div);
+            streamLine = div;
             streamKind = kind;
         }
-        log.scrollTop = log.scrollHeight;
-        return;
+        scrollToBottom();
     }
-    if (status === 'THINKING_FINISHED') {
-        if (streamBlock && streamKind === 'thinking') {
-            if (content) {
-                streamRaw = content;
-                streamBlock.innerHTML = renderMarkdown(content);
-            }
-        } else {
-            appendMessage('assistant', content || '', {markdown: true});
+
+    function finishStream() {
+        if (streamLine) {
+            streamLine = null;
+            streamKind = null;
         }
-        finalizeStream();
-        return;
     }
-    if (status === 'RESPONSE_FINISHED') {
-        if (streamBlock && streamKind === 'response') {
-            if (content) {
-                streamRaw = content;
-                streamBlock.innerHTML = renderMarkdown(content);
-            }
-        } else {
-            appendMessage('assistant', content || '', {markdown: true});
+
+    function setBusy(value) {
+        busy = value;
+        updateStatus();
+    }
+
+    // ---- WebSocket ----
+    function send(obj) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(obj));
+            return true;
         }
-        finalizeStream();
-        return;
+        writeLine('error', 'WebSocket 未连接，消息发送失败');
+        return false;
     }
-    if (status === 'TOOL_STREAMING') {
-        appendMessage('tool', '调用工具: ' + content);
-        return;
+
+    function nextRequestId() {
+        return 'r' + Date.now() + '-' + Math.random().toString(16).slice(2, 8);
     }
-    appendMessage('assistant', (status || '') + ' ' + (content || ''));
-}
 
-function appendPermissionRequest(msg) {
-    const div = appendMessage('permission', '🔐 工具审批: ' + msg.toolName + ' ' + (msg.description || ''));
-    div.appendChild(document.createTextNode('\n参数: ' + (msg.arguments || '')));
+    function connect() {
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+            return;
+        }
+        manualClose = false;
+        statusText.textContent = 'CONNECTING';
+        statusText.className = 'status connecting';
 
-    const actions = document.createElement('div');
-    actions.className = 'permission-actions';
+        ws = new WebSocket(wsUrl);
 
-    const approve = document.createElement('button');
-    approve.className = 'primary';
-    approve.textContent = '批准';
-    approve.onclick = () => {
-        permissions.delete(msg.toolCallId);
-        send({
+        ws.onopen = function () {
+            writeLine('system', 'WebSocket 已连接: ' + wsUrl);
+            updateStatus();
+        };
+
+        ws.onclose = function () {
+            writeLine('system', 'WebSocket 连接已断开');
+            setBusy(false);
+            updateStatus();
+            if (!manualClose) {
+                scheduleReconnect();
+            }
+        };
+
+        ws.onerror = function () {
+            writeLine('error', 'WebSocket 出错');
+            updateStatus();
+        };
+
+        ws.onmessage = function (event) {
+            let msg;
+            try {
+                msg = JSON.parse(event.data);
+            } catch (e) {
+                writeLine('error', '无法解析消息: ' + event.data);
+                return;
+            }
+            handleServerMessage(msg);
+        };
+    }
+
+    function scheduleReconnect() {
+        if (reconnectTimer) return;
+        writeLine('system', '3 秒后自动重连...');
+        reconnectTimer = setTimeout(function () {
+            reconnectTimer = null;
+            connect();
+        }, 3000);
+    }
+
+    // ---- protocol handling ----
+    function handleServerMessage(msg) {
+        switch (msg.type) {
+            case 'session_started':
+                runId = msg.runId;
+                writeLine('user', '开始会话: ' + msg.runId);
+                writeLine('system', '会话已创建: ' + runId);
+                updateStatus();
+                break;
+
+            case 'agent_event':
+                handleAgentEvent(msg.status, msg.content);
+                break;
+
+            case 'permission_requested':
+                handlePermissionRequested(msg);
+                break;
+
+            case 'permission_pending': {
+                finishStream();
+                let remaining = [];
+                try {
+                    remaining = JSON.parse(msg.content || '[]');
+                } catch (e) { /* ignore */ }
+                writeLine('system', '已记录决定，仍在等待 ' + remaining.length + ' 项审批');
+                updateStatus();
+                break;
+            }
+
+            case 'done':
+                finishStream();
+                setBusy(false);
+                writeLine('success', '本轮完成');
+                updateStatus();
+                break;
+
+            case 'error':
+                finishStream();
+                setBusy(false);
+                writeLine('error', '错误: ' + (msg.message || ''));
+                updateStatus();
+                break;
+
+            case 'stopped':
+                finishStream();
+                setBusy(false);
+                writeLine('system', '已停止');
+                updateStatus();
+                break;
+
+            case 'interrupted':
+                finishStream();
+                setBusy(false);
+                writeLine('system', '已中断: ' + (msg.message || ''));
+                updateStatus();
+                break;
+
+            default:
+                finishStream();
+                writeLine('system', '未知消息: ' + JSON.stringify(msg));
+        }
+    }
+
+    function handleAgentEvent(status, content) {
+        if (status === 'PERMISSION_REQUESTED' || status === 'PERMISSION_PENDING') return;
+
+        switch (status) {
+            case 'THINKING_STREAMING':
+                writeStream('thinking', content);
+                break;
+            case 'RESPONSE_STREAMING':
+                writeStream('assistant', content);
+                break;
+            case 'TOOL_STREAMING':
+                finishStream();
+                writeLine('tool', '调用工具: ' + (content || ''));
+                break;
+            case 'TOOL_FINISHED':
+                finishStream();
+                writeLine('tool', '[工具执行完成]');
+                break;
+            case 'THINKING_FINISHED':
+                if (streamLine && streamLine.dataset.kind === 'thinking') {
+                    if (content) {
+                        streamLine.textContent = content;
+                        scrollToBottom();
+                    }
+                    finishStream();
+                } else {
+                    writeLine('thinking', (content || ''));
+                }
+                break;
+            case 'RESPONSE_FINISHED':
+                if (streamLine && streamLine.dataset.kind === 'assistant') {
+                    if (content) {
+                        streamLine.textContent = content;
+                        scrollToBottom();
+                    }
+                    finishStream();
+                } else {
+                    writeLine('assistant', (content || ''));
+                }
+                break;
+            default:
+                finishStream();
+                writeLine('system', (status || '') + ' ' + (content || ''));
+        }
+    }
+
+    // ---- permissions ----
+    function handlePermissionRequested(msg) {
+        finishStream();
+        if (!pending.has(msg.toolCallId)) {
+            pending.set(msg.toolCallId, msg);
+        }
+        appendPermissionBlock(msg);
+        setBusy(true);
+        updateStatus();
+    }
+
+    function appendPermissionBlock(msg) {
+        const div = document.createElement('div');
+        div.className = 'line permission';
+        div.dataset.toolCallId = msg.toolCallId;
+
+        const title = document.createElement('span');
+        title.className = 'perm-title';
+        title.textContent = '🔐 工具审批';
+        div.appendChild(title);
+
+        const meta = document.createElement('span');
+        meta.className = 'perm-meta';
+        meta.textContent = '  ' + (msg.toolName || 'unknown') + '  ·  ' + (msg.toolCallId || '');
+        div.appendChild(meta);
+
+        if (msg.description) {
+            const desc = document.createElement('div');
+            desc.className = 'perm-meta';
+            desc.textContent = '说明: ' + msg.description;
+            div.appendChild(desc);
+        }
+
+        const args = document.createElement('span');
+        args.className = 'perm-args';
+        args.textContent = prettyJson(msg.arguments || '{}');
+        div.appendChild(args);
+
+        const actions = document.createElement('div');
+        actions.className = 'perm-actions';
+
+        actions.appendChild(makePermKey('A 批准', 'approve', function () {
+            answerPermission(msg, 'APPROVED');
+        }));
+        actions.appendChild(makePermKey('ALL 全部批准', 'approve', function () {
+            answerPermission(msg, 'APPROVE_ALL');
+        }));
+        actions.appendChild(makePermKey('E 编辑参数', '', function () {
+            const edited = window.prompt('修改后的 arguments JSON', msg.arguments || '{}');
+            if (edited === null) return;
+            try {
+                JSON.parse(edited);
+            } catch (e) {
+                writeLine('error', '编辑后的参数不是合法 JSON');
+                return;
+            }
+            answerPermission(msg, 'EDITED', edited);
+        }));
+        actions.appendChild(makePermKey('N 拒绝', 'reject', function () {
+            answerPermission(msg, 'REJECTED');
+        }));
+
+        div.appendChild(actions);
+        terminal.appendChild(div);
+        scrollToBottom();
+        cli.focus();
+    }
+
+    function makePermKey(label, cls, handler) {
+        const button = document.createElement('span');
+        button.className = 'key' + (cls ? ' ' + cls : '');
+        button.textContent = '[' + label + ']';
+        button.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            handler();
+        });
+        return button;
+    }
+
+    function answerPermission(msg, decision, editedArgs) {
+        if (!pending.has(msg.toolCallId)) return;
+        const ok = send({
             type: 'permission_respond',
             requestId: nextRequestId(),
-            runId,
+            runId: runId,
             toolCallId: msg.toolCallId,
             toolName: msg.toolName,
-            decision: 'APPROVED',
-            arguments: msg.arguments
+            decision: decision,
+            arguments: editedArgs !== undefined ? editedArgs : (msg.arguments || '')
         });
-        div.remove();
-        appendMessage('system', '已批准工具调用: ' + msg.toolName);
-    };
+        if (!ok) return;
 
-    const approveAll = document.createElement('button');
-    approveAll.className = 'secondary';
-    approveAll.textContent = '本会话全部批准';
-    approveAll.onclick = () => {
-        permissions.delete(msg.toolCallId);
-        send({
-            type: 'permission_respond',
-            requestId: nextRequestId(),
-            runId,
-            toolCallId: msg.toolCallId,
-            toolName: msg.toolName,
-            decision: 'APPROVE_ALL',
-            arguments: msg.arguments
-        });
-        div.remove();
-        appendMessage('system', '已批准并记录到本会话: ' + msg.toolName);
-    };
-
-    const reject = document.createElement('button');
-    reject.className = 'danger';
-    reject.textContent = '拒绝';
-    reject.onclick = () => {
-        permissions.delete(msg.toolCallId);
-        send({
-            type: 'permission_respond',
-            requestId: nextRequestId(),
-            runId,
-            toolCallId: msg.toolCallId,
-            toolName: msg.toolName,
-            decision: 'REJECTED',
-            arguments: msg.arguments
-        });
-        div.remove();
-        appendMessage('system', '已拒绝工具调用: ' + msg.toolName);
-    };
-
-    actions.appendChild(approve);
-    actions.appendChild(approveAll);
-    actions.appendChild(reject);
-    div.appendChild(actions);
-}
-
-startBtn.onclick = () => {
-    const goal = document.getElementById('goal').value.trim();
-    if (!goal) {
-        appendMessage('system', '请先输入目标');
-        return;
+        pending.delete(msg.toolCallId);
+        markPermissionResolved(msg.toolCallId, decision);
+        if (pending.size === 0) {
+            writeLine('system', '已提交全部审批，等待 Agent 继续执行...');
+        } else {
+            writeLine('system', '已提交 ' + decision + '，仍等待 ' + pending.size + ' 项审批');
+        }
+        updateStatus();
+        cli.focus();
     }
-    setBusy(true);
-    appendMessage('user', goal);
-    send({
-        type: 'start_session',
-        requestId: nextRequestId(),
-        goal,
-        workspace: document.getElementById('workspace').value.trim() || '/tmp'
-    });
-};
 
-sendBtn.onclick = () => {
-    const text = chatInput.value.trim();
-    if (!text || !runId || busy) return;
-    setBusy(true);
-    appendMessage('user', text);
-    send({
-        type: 'chat',
-        requestId: nextRequestId(),
-        runId,
-        content: text
-    });
-    chatInput.value = '';
-};
-
-chatInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendBtn.click();
+    function markPermissionResolved(toolCallId, decision) {
+        const blocks = terminal.querySelectorAll('.line.permission[data-tool-call-id="' + CSS.escape(toolCallId) + '"]');
+        for (const block of blocks) {
+            block.classList.add('resolved');
+            const title = block.querySelector('.perm-title');
+            if (title) title.textContent = '🔐 已提交: ' + decision + '  ' + toolCallId;
+        }
     }
-});
 
-interruptBtn.onclick = () => {
-    if (!runId) return;
-    const guidance = prompt('输入中断引导语（可选）', '请停止当前操作');
-    send({
-        type: 'interrupt',
-        requestId: nextRequestId(),
-        runId,
-        guidance: guidance || ''
+    // ---- command completion ----
+    function getCompletionMatches(input) {
+        const prefix = input.toLowerCase();
+        return COMMANDS.filter(function (cmd) {
+            return cmd.toLowerCase().startsWith(prefix);
+        });
+    }
+
+    function renderCompletion(matches, activeIndex) {
+        if (!matches.length) {
+            completionBox.hidden = true;
+            completionBox.innerHTML = '';
+            return;
+        }
+
+        completionBox.hidden = false;
+        completionBox.innerHTML = '';
+        const hint = document.createElement('div');
+        hint.className = 'completion-hint';
+        hint.textContent = 'Tab 循环补全 · 单击使用';
+        completionBox.appendChild(hint);
+
+        matches.forEach(function (cmd, i) {
+            const item = document.createElement('span');
+            item.className = 'completion-item' + (i === activeIndex ? ' active' : '');
+            item.textContent = cmd;
+            item.dataset.cmd = cmd;
+            item.addEventListener('click', function () {
+                cli.value = cmd + ' ';
+                hideCompletion();
+                cli.focus();
+            });
+            completionBox.appendChild(item);
+        });
+    }
+
+    function hideCompletion() {
+        completionMatches = [];
+        completionIndex = -1;
+        completionLastInput = '';
+        completionBox.hidden = true;
+        completionBox.innerHTML = '';
+    }
+
+    function updateCompletion(resetIndex) {
+        const raw = cli.value;
+        if (!raw.startsWith('/') || /\s/.test(raw)) {
+            hideCompletion();
+            return;
+        }
+
+        const matches = getCompletionMatches(raw);
+        if (resetIndex !== false) {
+            completionIndex = -1;
+        }
+        completionMatches = matches;
+        completionLastInput = raw;
+        renderCompletion(matches, completionIndex);
+    }
+
+    function handleTabCompletion() {
+        const raw = cli.value;
+        if (!raw.startsWith('/') || /\s/.test(raw)) {
+            return false;
+        }
+
+        const matches = getCompletionMatches(raw);
+        if (!matches.length) {
+            return false;
+        }
+
+        if (completionLastInput !== raw) {
+            completionIndex = 0;
+        } else {
+            completionIndex = (completionIndex + 1) % matches.length;
+        }
+        completionMatches = matches;
+
+        const candidate = matches[completionIndex];
+        if (matches.length === 1) {
+            cli.value = candidate + ' ';
+            hideCompletion();
+        } else {
+            cli.value = candidate;
+            completionLastInput = candidate;
+            renderCompletion(matches, completionIndex);
+        }
+        return true;
+    }
+
+    // ---- user commands ----
+    function startSession(goal) {
+        if (!goal.trim()) {
+            writeLine('error', '目标不能为空');
+            return;
+        }
+        if (busy) {
+            writeLine('error', '当前有任务正在执行，请先等待完成，或使用 /interrupt /stop');
+            return;
+        }
+        setBusy(true);
+        writeLine('user', goal);
+        const ok = send({
+            type: 'start_session',
+            requestId: nextRequestId(),
+            goal: goal,
+            workspace: workspace
+        });
+        if (!ok) {
+            setBusy(false);
+            return;
+        }
+        updateStatus();
+    }
+
+    function sendChat(content) {
+        if (!runId) {
+            writeLine('error', '还没有会话，请直接输入目标创建新会话');
+            return;
+        }
+        if (busy) {
+            writeLine('error', '当前有任务正在执行，请先等待完成，或使用 /interrupt /stop');
+            return;
+        }
+        setBusy(true);
+        writeLine('user', content);
+        const ok = send({
+            type: 'chat',
+            requestId: nextRequestId(),
+            runId: runId,
+            content: content
+        });
+        if (!ok) {
+            setBusy(false);
+            return;
+        }
+        updateStatus();
+    }
+
+    function runCommand(raw) {
+        const trimmed = raw.trim();
+        const parts = trimmed.split(/\s+/);
+        const cmd = parts[0].toLowerCase();
+        const rest = trimmed.slice(parts[0].length).trim();
+
+        switch (cmd) {
+            case '/help':
+            case '/h':
+            case 'help':
+            case '?':
+                showHelp();
+                return;
+            case '/clear':
+            case 'clear':
+                terminal.innerHTML = '';
+                return;
+            case '/status':
+                writeLine('system',
+                    'ws=' + (ws && ws.readyState === WebSocket.OPEN ? 'connected' : 'disconnected') +
+                    '  runId=' + (runId || '-') +
+                    '  workspace=' + workspace +
+                    '  busy=' + busy +
+                    '  pending=' + pending.size);
+                return;
+            case '/workspace':
+                if (!rest) {
+                    writeLine('system', '当前工作区: ' + workspace);
+                } else {
+                    workspace = rest;
+                    updateWorkspaceLabel();
+                    writeLine('system', '工作区已设置为: ' + workspace);
+                }
+                return;
+            case '/new':
+            case '/goal':
+                if (!rest) {
+                    writeLine('error', '用法: ' + cmd + ' <目标文本>');
+                    return;
+                }
+                startSession(rest);
+                return;
+            case '/stop':
+                if (!runId) {
+                    writeLine('error', '还没有会话');
+                    return;
+                }
+                send({type: 'stop', requestId: nextRequestId(), runId: runId});
+                writeLine('system', '已请求停止');
+                return;
+            case '/interrupt':
+                if (!runId) {
+                    writeLine('error', '还没有会话');
+                    return;
+                }
+                const guidance = rest || '请停止当前操作';
+                send({type: 'interrupt', requestId: nextRequestId(), runId: runId, guidance: guidance});
+                writeLine('system', '已请求中断: ' + guidance);
+                return;
+            case '/approve':
+                respondByCommand('APPROVED', rest);
+                return;
+            case '/approve_all':
+                respondByCommand('APPROVE_ALL', rest);
+                return;
+            case '/reject':
+                respondByCommand('REJECTED', rest);
+                return;
+            default:
+                writeLine('error', '未知命令: ' + cmd + '，输入 /help 查看帮助');
+        }
+    }
+
+    function respondByCommand(decision, toolCallIdOrEmpty) {
+        if (pending.size === 0) {
+            writeLine('error', '当前没有待审批的工具');
+            return;
+        }
+        let targetId = toolCallIdOrEmpty;
+        if (!targetId) {
+            if (pending.size === 1) {
+                targetId = Array.from(pending.keys())[0];
+            } else {
+                writeLine('error', '有多个待审批项，请指定 toolCallId: /' + decision.toLowerCase() + ' <toolCallId>');
+                return;
+            }
+        }
+        const msg = pending.get(targetId);
+        if (!msg) {
+            writeLine('error', '未找到待审批项: ' + targetId + '，当前为 ' + Array.from(pending.keys()).join(', '));
+            return;
+        }
+        answerPermission(msg, decision);
+    }
+
+    function showHelp() {
+        const lines = [
+            '── AgentCode TUI 帮助 ─────────────────────────────',
+            '直接输入文本',
+            '  无会话时: 创建会话并执行目标',
+            '  有会话空闲时: 作为多轮消息发送',
+            '  任务运行时: 需要等待完成，或用 /interrupt /stop 打断',
+            '',
+            '命令',
+            '  /help                    显示本帮助',
+            '  /new <目标>               创建新会话并执行',
+            '  /goal <目标>              同上',
+            '  /workspace <路径>         设置工作区（默认 ' + workspace + '）',
+            '  /stop                     停止当前任务',
+            '  /interrupt <引导语>       中断当前思考/任务',
+            '  /approve [toolCallId]     批准待审批工具',
+            '  /approve_all [toolCallId] 本会话全部批准该命令',
+            '  /reject [toolCallId]      拒绝待审批工具',
+            '  /status                   查看状态',
+            '  /clear 或 Ctrl+L          清屏',
+            '',
+            '审批框也支持鼠标点击: [A 批准] [ALL 全部批准] [E 编辑参数] [N 拒绝]'
+        ];
+        for (const line of lines) {
+            const div = document.createElement('div');
+            div.className = 'line system';
+            div.textContent = line;
+            terminal.appendChild(div);
+        }
+        scrollToBottom();
+    }
+
+    function handleInput() {
+        const raw = cli.value.trim();
+        if (!raw) {
+            hideCompletion();
+            return;
+        }
+        cli.value = '';
+        hideCompletion();
+        if (raw.startsWith('/') || raw === '?' || raw.toLowerCase() === 'help' || raw.toLowerCase() === 'clear') {
+            runCommand(raw);
+            return;
+        }
+        if (!runId) {
+            startSession(raw);
+        } else {
+            sendChat(raw);
+        }
+    }
+
+    // ---- events ----
+    cli.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            handleInput();
+        } else if (e.key === 'Tab') {
+            if (handleTabCompletion()) {
+                e.preventDefault();
+            }
+        } else if (e.key === 'l' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            terminal.innerHTML = '';
+        }
     });
-};
 
-stopBtn.onclick = () => {
-    if (!runId) return;
-    send({
-        type: 'stop',
-        requestId: nextRequestId(),
-        runId
+    cli.addEventListener('input', function () {
+        updateCompletion(true);
     });
-};
 
-connect();
+    document.addEventListener('click', function () {
+        if (document.activeElement !== cli) {
+            cli.focus();
+        }
+    });
+
+    // ---- boot ----
+    updateWorkspaceLabel();
+    writeLine('system', 'AgentCode Java TUI 已就绪');
+    writeLine('system', '直接输入目标开始，或输入 /help 查看命令');
+    updateStatus();
+    connect();
+})();
 </script>
 </body>
 </html>

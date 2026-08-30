@@ -2,7 +2,7 @@ package com.agentcode.service;
 
 import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.registry.AgentSessionRegistry;
-import com.agentcode.store.InMemoryAgentContextStore;
+import com.agentcode.store.AgentContextStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -26,7 +26,7 @@ import java.util.Set;
 public class AgentSessionMaintenance {
 
     private final AgentSessionRegistry sessionRegistry;
-    private final InMemoryAgentContextStore agentContextStore;
+    private final AgentContextStore agentContextStore;
     private final AgentCodeProperties agentCodeProperties;
 
     @Scheduled(
