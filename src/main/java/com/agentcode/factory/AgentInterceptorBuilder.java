@@ -1,6 +1,6 @@
 package com.agentcode.factory;
 
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.AgentContext;
 import com.agentcode.properties.AgentCodeProperties;
 import com.alibaba.cloud.ai.graph.agent.hook.Hook;
 import com.alibaba.cloud.ai.graph.agent.interceptor.Interceptor;

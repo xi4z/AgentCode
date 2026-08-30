@@ -1,29 +1,15 @@
 package com.agentcode.factory;
 
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.AgentContext;
 import com.agentcode.dto.AgentApprovalManager;
 import com.agentcode.dto.ApprovalPolicy;
 import com.agentcode.properties.AgentCodeProperties;
-import com.agentcode.session.AgentSession;
-import com.agentcode.session.AgentSessionRuntime;
-import com.agentcode.tools.SessionNoteTools;
+import com.agentcode.agent.AgentSession;
+import com.agentcode.agent.AgentSessionRuntime;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
-import com.alibaba.cloud.ai.graph.agent.AgentTool;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
-import com.alibaba.cloud.ai.graph.agent.hook.Hook;
-import com.alibaba.cloud.ai.graph.agent.hook.hip.HumanInTheLoopHook;
-import com.alibaba.cloud.ai.graph.agent.hook.hip.ToolConfig;
-import com.alibaba.cloud.ai.graph.agent.hook.modelcalllimit.ModelCallLimitHook;
-import com.alibaba.cloud.ai.graph.agent.hook.shelltool.ShellToolAgentHook;
 import com.agentcode.common.SessionConfigKeys;
-import com.alibaba.cloud.ai.graph.agent.hook.skills.SkillsAgentHook;
-import com.alibaba.cloud.ai.graph.agent.hook.summarization.SummarizationHook;
-import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemTools;
-import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
-import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
-import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
-import com.alibaba.cloud.ai.graph.skills.registry.filesystem.FileSystemSkillRegistry;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Component;
@@ -33,7 +19,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
-import static com.agentcode.context.AgentContext.DEFAULT_PROJECT_CONTEXT_FILES;
+import static com.agentcode.agent.AgentContext.DEFAULT_PROJECT_CONTEXT_FILES;
 
 /**
  * AgentSession 工厂：负责组装 ReactAgent、Hooks、Tools、RunnableConfig。

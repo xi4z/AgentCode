@@ -1,15 +1,15 @@
 package com.agentcode.service.Impl;
 
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.AgentContext;
 import com.agentcode.dto.AgentInterruptHandle;
-import com.agentcode.dto.AgentStream;
+import com.agentcode.properties.AgentCodeProperties;
+import com.agentcode.vo.AgentStream;
 import com.agentcode.exception.AgentContextNotFoundException;
 import com.agentcode.factory.AgentSessionFactory;
 import com.agentcode.registry.AgentSessionRegistry;
 import com.agentcode.service.ReactAgentService;
-import com.agentcode.session.AgentSession;
+import com.agentcode.agent.AgentSession;
 import com.agentcode.store.AgentContextStore;
-import com.agentcode.store.InMemoryAgentContextStore;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -23,6 +23,7 @@ public class ReActAgentServiceImpl implements ReactAgentService {
     private final AgentContextStore agentContextStore;
     private final AgentSessionFactory agentSessionFactory;
     private final AgentSessionRegistry agentSessionRegistry;
+    private final AgentCodeProperties aProperties;
 
     @Override
     public Flux<AgentStream> startNewSession(String goal, String workspace) {
@@ -32,11 +33,7 @@ public class ReActAgentServiceImpl implements ReactAgentService {
 
     @Override
     public String createSession(String goal, String workspace) {
-        AgentContext context = AgentContext.builder()
-                .runId(UUID.randomUUID().toString())
-                .workspace(workspace)
-                .goal(goal)
-                .build();
+        AgentContext context = new AgentContext(UUID.randomUUID().toString(), goal, workspace, aProperties.getAgent().getGlobalContextFile());
         agentContextStore.save(context.getRunId(), context);
         return context.getRunId();
     }

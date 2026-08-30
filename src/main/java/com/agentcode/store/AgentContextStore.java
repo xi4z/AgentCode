@@ -1,6 +1,6 @@
 package com.agentcode.store;
 
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.AgentContext;
 
 import java.util.Optional;
 

@@ -1,7 +1,7 @@
 package com.agentcode.registry;
 
 import com.agentcode.exception.SessionNotFoundException;
-import com.agentcode.session.AgentSession;
+import com.agentcode.agent.AgentSession;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;

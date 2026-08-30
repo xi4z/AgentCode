@@ -1,7 +1,7 @@
 package com.agentcode.service;
 
 import com.agentcode.dto.AgentInterruptHandle;
-import com.agentcode.dto.AgentStream;
+import com.agentcode.vo.AgentStream;
 import reactor.core.publisher.Flux;
 
 /**

@@ -1,4 +1,4 @@
-package com.agentcode.session;
+package com.agentcode.agent;
 
 import com.agentcode.dto.AgentApprovalManager;
 import com.alibaba.cloud.ai.graph.RunnableConfig;

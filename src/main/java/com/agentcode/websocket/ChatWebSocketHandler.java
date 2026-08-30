@@ -1,7 +1,7 @@
 package com.agentcode.websocket;
 
 import com.agentcode.dto.AgentInterruptHandle;
-import com.agentcode.dto.AgentStream;
+import com.agentcode.vo.AgentStream;
 import com.agentcode.service.ReactAgentService;
 import com.agentcode.websocket.ChatProtocol.ClientMessage;
 import com.agentcode.websocket.ChatProtocol.PermissionHandle;

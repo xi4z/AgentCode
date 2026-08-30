@@ -1,4 +1,4 @@
-package com.agentcode.dto;
+package com.agentcode.vo;
 
 
 /**

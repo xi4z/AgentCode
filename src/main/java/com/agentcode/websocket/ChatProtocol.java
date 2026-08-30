@@ -1,6 +1,6 @@
 package com.agentcode.websocket;
 
-import com.agentcode.dto.AgentStream;
+import com.agentcode.vo.AgentStream;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 import java.util.List;

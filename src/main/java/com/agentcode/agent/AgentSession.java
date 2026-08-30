@@ -1,10 +1,9 @@
-package com.agentcode.session;
+package com.agentcode.agent;
 
 import com.agentcode.common.SessionConfigKeys;
-import com.agentcode.context.AgentContext;
 import com.agentcode.dto.AgentApprovalManager;
 import com.agentcode.dto.AgentInterruptHandle;
-import com.agentcode.dto.AgentStream;
+import com.agentcode.vo.AgentStream;
 import com.agentcode.exception.AgentAlreadyRunningException;
 import com.agentcode.exception.InterruptFailException;
 import com.agentcode.exception.StopFailException;

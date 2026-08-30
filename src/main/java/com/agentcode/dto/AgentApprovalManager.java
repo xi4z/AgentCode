@@ -1,7 +1,7 @@
 package com.agentcode.dto;
 
 import com.agentcode.common.ShellParseHelper;
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.AgentContext;
 import com.alibaba.cloud.ai.graph.action.InterruptionMetadata;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;

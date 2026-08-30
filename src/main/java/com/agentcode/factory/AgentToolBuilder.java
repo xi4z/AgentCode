@@ -1,7 +1,6 @@
 package com.agentcode.factory;
 
-import com.agentcode.context.AgentContext;
-import com.agentcode.properties.AgentCodeProperties;
+import com.agentcode.agent.AgentContext;
 import com.alibaba.cloud.ai.graph.agent.AgentTool;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import lombok.RequiredArgsConstructor;
@@ -10,14 +9,8 @@ import org.springframework.ai.tool.ToolCallback;
 
 import com.agentcode.tools.SessionNoteTools;
 import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemTools;
-import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.GlobTool;
-import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.GrepTool;
-import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.ListFilesTool;
-import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.ReadFileTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
-import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.stereotype.Component;
 
