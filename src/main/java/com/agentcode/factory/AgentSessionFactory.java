@@ -71,6 +71,8 @@ public class AgentSessionFactory {
         ReactAgent reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
                 .model(chatModel)
+                .parallelToolExecution(true) // 开启并发调用
+                .maxParallelTools(5)
                 .systemPrompt(agentContext.systemPrompt(systemPrompt))
                 .saver(saver)
                 .toolContext(Map.of(SessionConfigKeys.AGENT_CONTEXT, agentContext))
