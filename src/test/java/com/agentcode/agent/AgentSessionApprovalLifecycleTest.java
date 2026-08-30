@@ -3,7 +3,9 @@ package com.agentcode.agent;
 import com.agentcode.context.AgentContext;
 import com.agentcode.dto.AgentInterruptHandle;
 import com.agentcode.dto.AgentStream;
+import com.agentcode.factory.AgentHookBuilder;
 import com.agentcode.factory.AgentSessionFactory;
+import com.agentcode.factory.AgentToolBuilder;
 import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.session.AgentSession;
 import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
@@ -39,8 +41,11 @@ class AgentSessionApprovalLifecycleTest {
             // 只审批 edit_file：shell 调用应当直接执行，不再弹审批
             properties.getAgent().setApprovalTools(List.of("edit_file"));
 
+            ShellCallModel chatModel = new ShellCallModel();
             AgentSession session = new AgentSessionFactory(
-                    new ShellCallModel(), new MemorySaver(), properties)
+                    chatModel, new MemorySaver(), properties,
+                    new AgentHookBuilder(chatModel, properties),
+                    new AgentToolBuilder(chatModel))
                     .create(context(workspace, "tools-config-run"));
 
             List<AgentStream> events = session.run("读取 /etc/hosts")
@@ -62,8 +67,11 @@ class AgentSessionApprovalLifecycleTest {
             AgentCodeProperties properties = new AgentCodeProperties();
             properties.getAgent().setApprovalTools(List.of("shell"));
 
+            ShellCallModel chatModel = new ShellCallModel();
             AgentSession session = new AgentSessionFactory(
-                    new ShellCallModel(), new MemorySaver(), properties)
+                    chatModel, new MemorySaver(), properties,
+                    new AgentHookBuilder(chatModel, properties),
+                    new AgentToolBuilder(chatModel))
                     .create(context(workspace, "timeout-run"));
 
             List<AgentStream> events = session.run("读取 /etc/hosts")

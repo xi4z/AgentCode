@@ -68,10 +68,10 @@ public class AgentCodeProperties {
         private Session session = new Session();
 
         // 抵达最大 Token 时压缩上下文
-        private int maxTokensBeforeSummary;
+        private int maxTokensBeforeSummary = 4000;
 
         // 在压缩后保持多少条消息, 即之后的全部压缩
-        private int messagesToKeep;
+        private int messagesToKeep = 20;
     }
 
     /** shell 静态评估名单，未配置的项沿用 {@code ApprovalPolicy} 内置默认 */
