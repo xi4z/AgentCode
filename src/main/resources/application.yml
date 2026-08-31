@@ -52,6 +52,11 @@ spring:
         enabled: ${MCP_CLIENT_ENABLED:false}
 
 agentcode:
+  checkpoint:
+    redis:
+      address: ${REDIS_CHECKPOINT_ADDRESS:redis://127.0.0.1:6379}
+      password: ${REDIS_CHECKPOINT_PASSWORD:}
+      database: ${REDIS_CHECKPOINT_DATABASE:0}
   audit:
     enabled: ${AGENTCODE_AUDIT_ENABLED:true}
   agent:

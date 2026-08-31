@@ -2,6 +2,7 @@ package com.agentcode.audit;
 
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.stereotype.Component;
@@ -16,9 +17,12 @@ import org.springframework.stereotype.Component;
 public class ChatModelAuditBeanPostProcessor implements BeanPostProcessor {
 
     private final boolean enabled;
+    private final ObjectProvider<AuditLogRepository> auditLogRepositoryProvider;
 
-    public ChatModelAuditBeanPostProcessor(@Value("${agentcode.audit.enabled:true}") boolean enabled) {
+    public ChatModelAuditBeanPostProcessor(@Value("${agentcode.audit.enabled:true}") boolean enabled,
+                                           ObjectProvider<AuditLogRepository> auditLogRepositoryProvider) {
         this.enabled = enabled;
+        this.auditLogRepositoryProvider = auditLogRepositoryProvider;
     }
 
     @Override
@@ -27,7 +31,7 @@ public class ChatModelAuditBeanPostProcessor implements BeanPostProcessor {
                 && bean instanceof ChatModel
                 && !(bean instanceof AuditedChatModel)
                 && shouldAudit(bean)) {
-            return new AuditedChatModel((ChatModel) bean, enabled);
+            return new AuditedChatModel((ChatModel) bean, enabled, auditLogRepositoryProvider.getIfAvailable());
         }
         return bean;
     }

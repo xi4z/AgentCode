@@ -57,12 +57,13 @@ public class AgentContext {
     StringBuilder sessionNotes = new StringBuilder(); // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
 
     public AgentContext(Context context) {
-        String workspace = context.getWorkspace();
-        if (workspace == null || workspace.isBlank()) {
+        if (context.getWorkspace() == null || context.getWorkspace().isBlank()) {
             context.setWorkspace(System.getProperty("user.dir"));
         }
         this.context = context;
-        this.sessionNotes.append(workspace);
+        if (context.getSessionNote() != null && !context.getSessionNote().isBlank()) {
+            this.sessionNotes.append(context.getSessionNote());
+        }
     }
 
     /** 未配置时使用的项目上下文文件顺序 */

@@ -41,6 +41,7 @@ public class ReActAgentServiceImpl implements ReactAgentService {
     @Override
     public String createSession(String goal, String workspace) {
         Context currContext = new Context();
+        currContext.setRunId(UUID.randomUUID().toString());
         currContext.setGoal(goal);
         currContext.setWorkspace(workspace);
         contextMapper.insert(
@@ -97,8 +98,7 @@ public class ReActAgentServiceImpl implements ReactAgentService {
 
     public List<ContextVo> getRunIds(){
         QueryWrapper<Context> queryWrapper = new QueryWrapper<>();
-        queryWrapper.select("run_id")
-                .orderByDesc("updated_at");
+        queryWrapper.orderByDesc("updated_at");
         List<Context> contexts = contextMapper.selectList(queryWrapper);
         List<ContextVo> vos = new ArrayList<>();
         for (Context context : contexts) {

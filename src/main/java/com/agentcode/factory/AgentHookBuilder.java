@@ -1,6 +1,8 @@
 package com.agentcode.factory;
 
 import com.agentcode.agent.AgentContext;
+import com.agentcode.hooks.CheckpointAgentMetricsHook;
+import com.agentcode.hooks.CheckpointModelMetricsHook;
 import com.agentcode.hooks.UpdateSessionNotesHook;
 import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.store.AgentContextStore;
@@ -113,6 +115,12 @@ public class AgentHookBuilder {
         public Builder withUpdateSessionNotes(){
             UpdateSessionNotesHook updateSessionNotesHook = new UpdateSessionNotesHook(store);
             hooks.add(updateSessionNotesHook);
+            return this;
+        }
+
+        public Builder withCheckpointMetrics() {
+            hooks.add(new CheckpointModelMetricsHook());
+            hooks.add(new CheckpointAgentMetricsHook());
             return this;
         }
 

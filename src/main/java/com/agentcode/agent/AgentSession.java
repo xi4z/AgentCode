@@ -6,6 +6,7 @@ import com.agentcode.dto.AgentInterruptHandle;
 import com.agentcode.vo.AgentStream;
 import com.agentcode.exception.AgentAlreadyRunningException;
 import com.agentcode.exception.InterruptFailException;
+import com.agentcode.exception.InvalidStatusException;
 import com.agentcode.exception.StopFailException;
 import com.agentcode.exception.TaskNotFoundException;
 import com.alibaba.cloud.ai.graph.NodeOutput;
@@ -13,6 +14,7 @@ import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.action.InterruptionMetadata;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
+import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
@@ -60,6 +62,7 @@ public class AgentSession {
     private final ReactAgent reactAgent;
     private final ShellTool2 shellTool2;
     private final AgentApprovalManager approvalManager;
+    private final BaseCheckpointSaver saver;
 
     private volatile RunnableConfig config;
 
@@ -76,6 +79,7 @@ public class AgentSession {
         this.reactAgent = runtime.getReactAgent();
         this.shellTool2 = runtime.getShellTool2();
         this.approvalManager = runtime.getApprovalManager();
+        this.saver = runtime.getSaver();
         this.config = runtime.getInitialConfig();
     }
 
@@ -85,15 +89,21 @@ public class AgentSession {
             config.context().remove(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY);
             config.metadata().ifPresent(metadata -> metadata.remove(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY));
         }
-        return run(goal, config);
+        return run(goal, config, Status.FREE);
     }
 
-    private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
+private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
+        return run(goal, runConfig, Status.FREE);
+    }
+
+    private Flux<AgentStream> run(String goal, RunnableConfig runConfig, Status expectedStatus){
         Sinks.Many<AgentStream> sink;
         synchronized (this) {
-            if (status == Status.RUNNING) {
-                // 此时不允许run
-                throw new AgentAlreadyRunningException("会话:" + agentContext.getRunId() + "正在运行");
+            if (status != expectedStatus) {
+                if (status == Status.RUNNING) {
+                    throw new AgentAlreadyRunningException("会话:" + agentContext.getRunId() + "正在运行");
+                }
+                throw new InvalidStatusException("会话:" + agentContext.getRunId() + "当前状态为 " + status + "，不能开启新的对话，请先完成/取消审批");
             }
             status = Status.RUNNING;
             sink = Sinks.many()
@@ -210,12 +220,31 @@ public class AgentSession {
 
     /**
      * 丢弃当前挂在 config.context 上的审批状态（已放行的 feedback、待审批列表、已提交的决定）。
+     * 同时释放 checkpoint thread，避免旧的中断消息在下次 run 时被重新加载。
      */
     private void clearApprovalState() {
         config.context().remove(SessionConfigKeys.HANDLED_INTERRUPTION);
         config.context().remove(SessionConfigKeys.PENDING_INTERRUPTIONS);
         config.context().remove(SessionConfigKeys.PENDING_RESPONSES);
         approvalWaitSinceEpochMs = 0;
+        releaseCheckpointThread();
+    }
+
+    /**
+     * 调用 Spring AI Alibaba 的 {@link BaseCheckpointSaver#release(RunnableConfig)}：
+     * 该方法会把 GRAPH_THREAD 标记为 released 并清空内存中的 checkpoint，
+     * 下次同一 runId 重新 run 时不会加载旧的未完成 tool-call 状态。
+     */
+    private void releaseCheckpointThread() {
+        try {
+            if (saver != null && config != null) {
+                saver.release(config);
+                log.info("AUDIT_CHECKPOINT_RELEASED runId={}", agentContext.getRunId());
+            }
+        } catch (Exception e) {
+            // 释放失败不能阻塞会话状态清理；旧 checkpoint 最多被忽略或由后续清理任务兜底
+            log.warn("AUDIT_CHECKPOINT_RELEASE_FAILED runId={} error={}", agentContext.getRunId(), e.getMessage());
+        }
     }
 
     /**
@@ -368,7 +397,13 @@ public class AgentSession {
                     fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
                     approvalManager.rememberApproval(handle, originalArguments);
                 }
-                case EDITED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.EDITED);
+                case EDITED -> {
+                    // 临时关闭 EDITED：避免编辑后的参数再次触发审批时形成无限恢复循环。
+                    // 后续可重新开启，但需要增加恢复次数上限和参数合法性校验。
+                    log.warn("AUDIT_EDITED_DISABLED runId={} toolCallId={} treatAs=REJECTED",
+                            agentContext.getRunId(), entry.getKey());
+                    fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
+                }
                 default -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
             }
 
@@ -388,7 +423,7 @@ public class AgentSession {
         config.context().put(SessionConfigKeys.AGENT_CONTEXT, agentContext);
         // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
         shellTool2.getSessionManager().initialize(newConfig);
-        return run("");
+        return run("", newConfig, Status.INTERRUPTED);
     }
 
     private void logAgentRun(long runStartNanos, String runId, String goal, String result,

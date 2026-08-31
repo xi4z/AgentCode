@@ -65,6 +65,7 @@ public class AgentSessionFactory {
                 .withApproval(approvalTools)
                 .withSkills()
                 .withUpdateSessionNotes()
+                .withCheckpointMetrics()
                 .build();
 
 
@@ -78,7 +79,7 @@ public class AgentSessionFactory {
                 .toolContext(Map.of(SessionConfigKeys.AGENT_CONTEXT, agentContext))
                 .tools(agentToolBuilder.builder(agentContext).mainAgent().withSubAgent(this.createSubAgent(agentContext)).build())
                 .hooks(result.getHooks())
-                .interceptors(agentInterceptorBuilder.builder(agentContext).withTodoList().build())
+                .interceptors(agentInterceptorBuilder.builder(agentContext).withTodoList().withToolRetry(2).withToolMetrics().build())
                 .build();
 
         // 在重新 run 之后, 修改 context 状态
@@ -93,6 +94,7 @@ public class AgentSessionFactory {
                 .shellTool2(result.getShellTool2())
                 .approvalManager(approvalManager)
                 .initialConfig(config)
+                .saver(saver)
                 .build();
 
         return new AgentSession(agentContext, runtime);

@@ -127,7 +127,14 @@ public class ChatWebSocketHandler implements WebSocketHandler {
 
     private void subscribeAgent(WebSocketSession session, String requestId, String runId, String goal,
                                 Sinks.Many<String> outbound) {
-        subscribe(session, requestId, runId, agentService.run(goal, runId), outbound);
+        Flux<AgentStream> stream;
+        try {
+            stream = agentService.run(goal, runId);
+        } catch (Exception e) {
+            send(outbound, ServerMessage.error(requestId, runId, e.getMessage()));
+            return;
+        }
+        subscribe(session, requestId, runId, stream, outbound);
     }
 
     private void subscribe(WebSocketSession session, String requestId, String runId,

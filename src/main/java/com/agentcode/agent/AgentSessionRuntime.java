@@ -4,6 +4,7 @@ import com.agentcode.dto.AgentApprovalManager;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
+import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
 import lombok.Builder;
 import lombok.Getter;
 
@@ -21,4 +22,5 @@ public class AgentSessionRuntime {
     private final ShellTool2 shellTool2;
     private final AgentApprovalManager approvalManager;
     private final RunnableConfig initialConfig;
+    private final BaseCheckpointSaver saver;
 }

@@ -1,22 +1,41 @@
 package com.agentcode.config;
 
-import com.alibaba.cloud.ai.graph.checkpoint.savers.MemorySaver;
-import com.alibaba.cloud.ai.graph.checkpoint.savers.mysql.MysqlSaver;
+import com.alibaba.cloud.ai.graph.checkpoint.savers.redis.RedisSaver;
 import lombok.RequiredArgsConstructor;
+import org.redisson.Redisson;
+import org.redisson.api.RedissonClient;
+import org.redisson.config.Config;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-
-import javax.sql.DataSource;
 
 @Configuration
 @RequiredArgsConstructor
 public class SaverConfig {
-    private final DataSource dataSource;
 
+    @Value("${agentcode.checkpoint.redis.address:redis://127.0.0.1:6379}")
+    private String redisAddress;
+
+    @Value("${agentcode.checkpoint.redis.password:}")
+    private String redisPassword;
+
+    @Value("${agentcode.checkpoint.redis.database:0}")
+    private int redisDatabase;
+
+    @Bean(destroyMethod = "shutdown")
+    public RedissonClient redissonClient() {
+        Config config = new Config();
+        var single = config.useSingleServer()
+                .setAddress(redisAddress)
+                .setDatabase(redisDatabase);
+        if (redisPassword != null && !redisPassword.isBlank()) {
+            single.setPassword(redisPassword);
+        }
+        return Redisson.create(config);
+    }
 
     @Bean
-    public MemorySaver memorySaver(){
-        MysqlSaver saver = MysqlSaver.builder().dataSource(dataSource).build();
-        return saver;
+    public RedisSaver redisSaver(RedissonClient redissonClient) {
+        return RedisSaver.builder().redisson(redissonClient).build();
     }
 }
