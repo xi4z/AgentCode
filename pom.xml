@@ -102,6 +102,18 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- Elasticsearch Java Client：支持倒排检索（BM25）与 dense_vector/kNN 向量检索 -->
+        <dependency>
+            <groupId>co.elastic.clients</groupId>
+            <artifactId>elasticsearch-java</artifactId>
+        </dependency>
+
+        <!-- Spring AI Elasticsearch Vector Store：统一使用 ES 做向量 + 倒排检索 -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-vector-store-elasticsearch</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>

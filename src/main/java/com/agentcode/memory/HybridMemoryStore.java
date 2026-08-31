@@ -50,9 +50,8 @@ public class HybridMemoryStore implements MemoryStore {
      * @return
      */
     private boolean tryHit(String memory){
-
-
-
+        // TODO: 查找相似记忆并执行命中强化；暂未实现，先返回 false 表示未命中
+        return false;
     }
 
 
