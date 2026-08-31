@@ -20,6 +20,17 @@ spring:
       schema-locations: ${DB_SCHEMA_LOCATIONS:classpath:schema.sql}
       continue-on-error: ${DB_INIT_CONTINUE_ON_ERROR:false}
 
+  elasticsearch:
+    uris: ${ES_URIS:http://localhost:9200}
+    connection-timeout: ${ES_CONNECTION_TIMEOUT:5s}
+    socket-timeout: ${ES_SOCKET_TIMEOUT:30s}
+
+  autoconfigure:
+    # HybridMemoryStore 直接使用 ElasticsearchClient 做自定义 agent_memory 索引；
+    # 暂时排除 Spring AI ES VectorStore 自动装配，避免和长期记忆索引冲突。
+    exclude:
+      - org.springframework.ai.vectorstore.elasticsearch.autoconfigure.ElasticsearchVectorStoreAutoConfiguration
+
   ai:
     model:
       # openai / dashscope / anthropic / ollama
