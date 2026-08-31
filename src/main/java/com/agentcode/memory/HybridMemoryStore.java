@@ -5,12 +5,16 @@ import co.elastic.clients.elasticsearch._types.mapping.DenseVectorSimilarity;
 import co.elastic.clients.elasticsearch._types.query_dsl.Query;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
+import com.agentcode.config.PromptConfig;
+import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
-import lombok.RequiredArgsConstructor;
+import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.stereotype.Component;
 
@@ -44,7 +48,6 @@ import java.util.UUID;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class HybridMemoryStore implements MemoryStore {
 
     private static final String INDEX_NAME = "agent_memory";
@@ -63,27 +66,36 @@ public class HybridMemoryStore implements MemoryStore {
 
     private volatile boolean indexInitialized = false;
 
+    public HybridMemoryStore(EmbeddingModel embeddingModel, ElasticsearchClient esClient) {
+        this.embeddingModel = embeddingModel;
+        this.esClient = esClient;
+
+        this.memoryAgent = ReactAgent.builder()
+                .name("memory_agent")
+                .description("一个用于分析输入对话中有什么值得记入长期记忆中的Agent")
+                .systemPrompt(PromptConfig.MEMORY_PROMPT)
+                .outputType(RawMemories.class)
+                .build();
+    }
+
     @Override
     public void save(List<Message> messages, String runId) {
         if (messages == null || messages.isEmpty()) {
             return;
         }
         ensureIndex();
+        RawMemories memories = extractMemory(messages, runId);
+        for (RawMemories.RawMemory rawMemory : memories.memories) {
+            // TODO 转换成 MemoryRecord
 
-        for (Message message : messages) {
-            String content = extractMemory(message, runId);
-            if (content == null || content.isBlank()) {
-                continue;
-            }
+            // TODO 将 MemoryRecord try hit
 
-            MemoryRecord candidate = buildRecord(content, runId, classifyMemoryType(content));
-            List<Float> vector = embed(candidate.getContent());
-            if (vector.isEmpty()) {
-                continue;
-            }
+            // TODO 命中时 strength
 
-            saveInternal(candidate, vector);
+            // TODO 未命中时 save
+
         }
+
     }
 
     @Override
@@ -527,51 +539,20 @@ public class HybridMemoryStore implements MemoryStore {
      * <p>TODO: 这里可以替换为 ReActAgent / ChatClient 结构化输出，由模型判断：
      * 1. 是否值得长期保存；2. 保存类型；3. 是新增还是覆盖/合并；4. 是否需要摘要。
      */
-    private String extractMemory(Message message, String runId) {
-        if (message == null) {
-            return null;
+    private RawMemories extractMemory(List<Message> messages, String runId){
+        RunnableConfig runnableConfig = RunnableConfig.builder()
+                .threadId(runId + "_MEMORY")
+                .build();
+        String userMsg = PromptConfig.MEMORY_USER.replace("{messagesJson}", messages.toString());
+        try {
+            AssistantMessage call = memoryAgent.call(userMsg, runnableConfig);
+            ObjectMapper mapper = new ObjectMapper();
+            return mapper.readValue(call.getText(), RawMemories.class);
+        } catch (GraphRunnerException | JsonProcessingException e){
+            throw new RuntimeException(e);
         }
-        if (!(message instanceof UserMessage) && !(message instanceof AssistantMessage)) {
-            return null;
-        }
-        if (message instanceof AssistantMessage assistantMessage && assistantMessage.hasToolCalls()) {
-            return null;
-        }
-
-        String text = message.getText();
-        if (text == null || text.isBlank()) {
-            return null;
-        }
-        String trimmed = text.trim();
-        if (trimmed.length() < 8) {
-            return null;
-        }
-
-        return trimmed;
     }
 
-    private MemoryRecord.MemoryType classifyMemoryType(String content) {
-        String text = content.toLowerCase();
-        if (containsAny(text, "以后都", "长期", "一直", "记住我", "我的偏好", "我喜欢", "我讨厌", "我不喜欢")) {
-            return MemoryRecord.MemoryType.USER;
-        }
-        if (containsAny(text, "这个项目", "本仓库", "当前仓库", "项目约定", "项目用", "项目使用")) {
-            return MemoryRecord.MemoryType.PROJECT;
-        }
-        if (containsAny(text, "全局", "所有项目", "通用", "跨项目")) {
-            return MemoryRecord.MemoryType.GLOBAL;
-        }
-        return MemoryRecord.MemoryType.SESSION;
-    }
-
-    private boolean containsAny(String text, String... keywords) {
-        for (String keyword : keywords) {
-            if (text.contains(keyword)) {
-                return true;
-            }
-        }
-        return false;
-    }
 
     private record ScoredMemory(
             MemoryRecord memory,
