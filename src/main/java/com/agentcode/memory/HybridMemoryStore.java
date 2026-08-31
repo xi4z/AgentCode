@@ -10,11 +10,12 @@ import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.stereotype.Component;
 
@@ -28,6 +29,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -37,14 +39,11 @@ import java.util.UUID;
  *
  * <p>当前策略：
  * <ul>
- *   <li>save：先用规则抽取候选记忆，再用向量 + 倒排混排找旧记忆；命中则强化，未命中则新建</li>
+ *   <li>save：ReActAgent 抽取 RawMemories，再转换 MemoryRecord；命中强化，未命中保存</li>
  *   <li>tryHit：只尝试命中同类型记忆，并用纯向量 cosine 相似度判断是否同一条</li>
  *   <li>search：分层召回 SESSION / PROJECT / GLOBAL / USER，再按业务分数重排</li>
  *   <li>strengthen：提升 hitCount / confidence / TTL，并满足阈值后逐步升级记忆类型</li>
  * </ul>
- *
- * <p>后续可把 {@link #extractMemory(Message, String)} 替换为 ReActAgent / ChatClient 结构化输出，
- * 以更接近 Mem0、Letta 等系统的“LLM 抽取 + 记忆更新”模式。
  */
 @Slf4j
 @Component
@@ -60,19 +59,27 @@ public class HybridMemoryStore implements MemoryStore {
     private static final double MATCH_THRESHOLD = 0.85;
     private static final double SESSION_QUALITY_THRESHOLD = 0.72;
 
+    private static final String ACTION_ADD = "ADD";
+    private static final String ACTION_UPDATE = "UPDATE";
+    private static final String ACTION_DELETE = "DELETE";
+    private static final String ACTION_NONE = "NONE";
+
     private final ReactAgent memoryAgent;
     private final EmbeddingModel embeddingModel;
     private final ElasticsearchClient esClient;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     private volatile boolean indexInitialized = false;
 
-    public HybridMemoryStore(EmbeddingModel embeddingModel, ElasticsearchClient esClient) {
+    public HybridMemoryStore(ChatModel chatModel,
+                             EmbeddingModel embeddingModel,
+                             ElasticsearchClient esClient) {
         this.embeddingModel = embeddingModel;
         this.esClient = esClient;
-
         this.memoryAgent = ReactAgent.builder()
                 .name("memory_agent")
                 .description("一个用于分析输入对话中有什么值得记入长期记忆中的Agent")
+                .model(chatModel)
                 .systemPrompt(PromptConfig.MEMORY_PROMPT)
                 .outputType(RawMemories.class)
                 .build();
@@ -84,18 +91,20 @@ public class HybridMemoryStore implements MemoryStore {
             return;
         }
         ensureIndex();
-        RawMemories memories = extractMemory(messages, runId);
-        for (RawMemories.RawMemory rawMemory : memories.memories) {
-            // TODO 转换成 MemoryRecord
 
-            // TODO 将 MemoryRecord try hit
+        try {
+            RawMemories memories = extractMemory(messages, runId);
+            if (memories == null || memories.getMemories() == null) {
+                return;
+            }
 
-            // TODO 命中时 strength
-
-            // TODO 未命中时 save
-
+            for (RawMemories.RawMemory rawMemory : memories.getMemories()) {
+                applyRawMemory(rawMemory, runId);
+            }
+        } catch (Exception e) {
+            // 记忆写入失败不应该打断主 Agent 会话流程。
+            log.warn("AUDIT_MEMORY_SAVE_FAILED runId={} error={}", runId, e.getMessage(), e);
         }
-
     }
 
     @Override
@@ -110,7 +119,48 @@ public class HybridMemoryStore implements MemoryStore {
             return List.of();
         }
 
-        return null;
+        try {
+            List<ScoredMemory> candidates = layeredSearch(content, vector, DEFAULT_SEARCH_TOP_K);
+            return reRank(candidates);
+        } catch (IOException e) {
+            throw new RuntimeException("Search agent memory failed", e);
+        }
+    }
+
+    private void applyRawMemory(RawMemories.RawMemory rawMemory, String runId) {
+        if (rawMemory == null) {
+            return;
+        }
+
+        String action = normalizeAction(rawMemory.getAction());
+
+        if (ACTION_NONE.equals(action)) {
+            return;
+        }
+
+        if (ACTION_DELETE.equals(action)) {
+            if (notBlank(rawMemory.getExistingMemoryId())) {
+                deleteMemory(rawMemory.getExistingMemoryId());
+            }
+            return;
+        }
+
+        if (!notBlank(rawMemory.getContent())) {
+            return;
+        }
+
+        MemoryRecord candidate = toMemoryRecord(rawMemory, runId, action);
+        List<Float> vector = embed(candidate.getContent());
+        if (vector.isEmpty()) {
+            return;
+        }
+
+        if (ACTION_UPDATE.equals(action) && notBlank(rawMemory.getExistingMemoryId())) {
+            updateExistingMemory(candidate, rawMemory.getExistingMemoryId(), vector);
+            return;
+        }
+
+        saveInternal(candidate, vector);
     }
 
     /**
@@ -168,6 +218,56 @@ public class HybridMemoryStore implements MemoryStore {
         }
     }
 
+    private void updateExistingMemory(MemoryRecord candidate, String existingMemoryId, List<Float> vector) {
+        MemoryRecord existing = getMemory(existingMemoryId);
+        if (existing == null) {
+            candidate.setMemoryId(existingMemoryId);
+            try {
+                indexMemory(candidate, vector);
+            } catch (IOException e) {
+                throw new RuntimeException("Update agent memory failed", e);
+            }
+            return;
+        }
+
+        existing.setMemoryId(existingMemoryId);
+        existing.setContent(candidate.getContent());
+        existing.setType(candidate.getType());
+        existing.setTtl(candidate.getTtl());
+        existing.setUpdateAt(LocalDateTime.now());
+        existing.setHitCount(existing.getHitCount() + 1);
+
+        double confidence = Math.max(existing.getConfidence(), candidate.getConfidence());
+        existing.setConfidence(Math.min(1.0d, confidence + 0.03d));
+
+        Map<String, Object> meta = mergeMeta(existing.getMeta(), candidate.getMeta());
+        rememberHit(meta, candidate.getMeta() == null ? null : candidate.getMeta().get("runId"));
+        existing.setMeta(meta);
+
+        try {
+            // content_vector 已变化，使用全量 index 覆盖，避免旧向量残留。
+            indexMemory(existing, vector);
+        } catch (IOException e) {
+            throw new RuntimeException("Update agent memory failed", e);
+        }
+    }
+
+    private void deleteMemory(String memoryId) {
+        try {
+            esClient.delete(d -> d.index(INDEX_NAME).id(memoryId));
+        } catch (IOException e) {
+            throw new RuntimeException("Delete agent memory failed", e);
+        }
+    }
+
+    private MemoryRecord getMemory(String memoryId) {
+        try {
+            return esClient.get(g -> g.index(INDEX_NAME).id(memoryId), MemoryRecord.class).source();
+        } catch (IOException e) {
+            throw new RuntimeException("Get agent memory failed", e);
+        }
+    }
+
     private void strengthenMemory(MemoryRecord rawMemory, MemoryRecord target) {
         if (target == null) {
             return;
@@ -182,6 +282,7 @@ public class HybridMemoryStore implements MemoryStore {
 
         Map<String, Object> meta = target.getMeta() == null ? new HashMap<>() : new HashMap<>(target.getMeta());
         rememberHit(meta, rawMemory.getMeta() == null ? null : rawMemory.getMeta().get("runId"));
+        meta.put("lastMatchContent", rawMemory.getContent());
         target.setMeta(meta);
 
         // 基础升级策略：优先按“不同 runId 命中数”泛化，避免同一个会话内重复刷屏导致误升级。
@@ -263,7 +364,7 @@ public class HybridMemoryStore implements MemoryStore {
             case SESSION -> 0.9;
         };
 
-        double base = sm.score() + 0.05 * sm.cosineScore();
+        double base = sm.esScore() + 0.05 * sm.cosine();
         return base * recencyBoost * confidenceBoost * typeBoost * hitCountBoost;
     }
 
@@ -475,6 +576,168 @@ public class HybridMemoryStore implements MemoryStore {
                 .build();
     }
 
+    private MemoryRecord toMemoryRecord(RawMemories.RawMemory rawMemory, String runId, String action) {
+        MemoryRecord.MemoryType type = parseMemoryType(rawMemory.getType());
+        String memoryId = ACTION_UPDATE.equals(action) && notBlank(rawMemory.getExistingMemoryId())
+                ? rawMemory.getExistingMemoryId()
+                : UUID.randomUUID().toString();
+
+        double confidence = rawMemory.getConfidence() == null ? 0.6d : clamp01(rawMemory.getConfidence(), 0.6d);
+        int ttl = rawMemory.getTtlSeconds() == null || rawMemory.getTtlSeconds() <= 0
+                ? defaultTtl(type)
+                : rawMemory.getTtlSeconds();
+
+        Map<String, Object> meta = new HashMap<>();
+        meta.put("runId", runId == null ? "" : runId);
+        meta.put("action", action);
+        meta.put("scope", rawMemory.getScope());
+        meta.put("importance", rawMemory.getImportance() == null ? 0.5d : clamp01(rawMemory.getImportance(), 0.5d));
+        if (notBlank(rawMemory.getDedupeKey())) {
+            meta.put("dedupeKey", rawMemory.getDedupeKey());
+        }
+        if (rawMemory.getTags() != null) {
+            meta.put("tags", rawMemory.getTags());
+        }
+        if (notBlank(rawMemory.getReason())) {
+            meta.put("reason", rawMemory.getReason());
+        }
+        rememberHit(meta, runId);
+
+        return MemoryRecord.builder()
+                .memoryId(memoryId)
+                .type(type)
+                .content(rawMemory.getContent())
+                .confidence(confidence)
+                .updateAt(LocalDateTime.now())
+                .ttl(ttl)
+                .hitCount(0)
+                .meta(meta)
+                .build();
+    }
+
+    private RawMemories extractMemory(List<Message> messages, String runId) {
+        try {
+            RunnableConfig runnableConfig = RunnableConfig.builder()
+                    .threadId((runId == null ? "" : runId) + "_MEMORY")
+                    .build();
+
+            UserMessage userMessage = new UserMessage(buildMemoryPrompt(messages, runId));
+            AssistantMessage call = memoryAgent.call(userMessage, runnableConfig);
+            return parseRawMemories(call.getText());
+        } catch (GraphRunnerException e) {
+            throw new RuntimeException(e);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to build memory extraction prompt", e);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to collect existing memories", e);
+        }
+    }
+
+    private String buildMemoryPrompt(List<Message> messages, String runId) throws JsonProcessingException, IOException {
+        List<Map<String, Object>> messagePayloads = new ArrayList<>();
+        for (Message message : messages) {
+            if (message == null) {
+                continue;
+            }
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("type", message.getMessageType().getValue());
+            payload.put("text", message.getText() == null ? "" : message.getText());
+            messagePayloads.add(payload);
+        }
+
+        List<Map<String, Object>> existingMemories = collectExistingMemories(messages);
+
+        Map<String, Object> request = new HashMap<>();
+        request.put("runId", runId);
+        request.put("messages", messagePayloads);
+        request.put("existingMemories", existingMemories);
+
+        String messagesJson = objectMapper.writeValueAsString(request);
+        return PromptConfig.MEMORY_USER.replace("{messagesJson}", messagesJson);
+    }
+
+    private List<Map<String, Object>> collectExistingMemories(List<Message> messages) throws IOException {
+        Map<String, MemoryRecord> unique = new LinkedHashMap<>();
+        for (Message message : messages) {
+            if (message == null || message.getText() == null || message.getText().isBlank()) {
+                continue;
+            }
+            List<Float> vector = embed(message.getText());
+            if (vector.isEmpty()) {
+                continue;
+            }
+            List<ScoredMemory> hits = hybridSearchByType(message.getText(), 5, vector, null);
+            for (ScoredMemory hit : hits) {
+                if (hit.memory() != null && hit.memory().getMemoryId() != null && !isExpired(hit.memory())) {
+                    unique.putIfAbsent(hit.memory().getMemoryId(), hit.memory());
+                }
+            }
+            if (unique.size() >= 20) {
+                break;
+            }
+        }
+
+        return unique.values().stream()
+                .map(this::memoryToPromptPayload)
+                .toList();
+    }
+
+    private Map<String, Object> memoryToPromptPayload(MemoryRecord memory) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("memoryId", memory.getMemoryId());
+        payload.put("type", memory.getType() == null ? null : memory.getType().name());
+        payload.put("content", memory.getContent());
+        payload.put("confidence", memory.getConfidence());
+        payload.put("updateAt", memory.getUpdateAt() == null ? null : memory.getUpdateAt().toString());
+        payload.put("ttl", memory.getTtl());
+        payload.put("hitCount", memory.getHitCount());
+        if (memory.getMeta() != null) {
+            payload.put("scope", memory.getMeta().get("scope"));
+            payload.put("dedupeKey", memory.getMeta().get("dedupeKey"));
+            payload.put("tags", memory.getMeta().get("tags"));
+        }
+        return payload;
+    }
+
+    private RawMemories parseRawMemories(String text) throws JsonProcessingException {
+        String json = extractJsonObject(text);
+        if (json.isEmpty()) {
+            return new RawMemories(List.of());
+        }
+
+        RawMemories memories = objectMapper.readValue(json, RawMemories.class);
+        if (memories.getMemories() == null) {
+            memories.setMemories(List.of());
+        }
+        return memories;
+    }
+
+    private String extractJsonObject(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+
+        String cleaned = text.trim();
+        if (cleaned.startsWith("```")) {
+            int firstLineEnd = cleaned.indexOf('\n');
+            if (firstLineEnd >= 0) {
+                cleaned = cleaned.substring(firstLineEnd + 1);
+            }
+            int fence = cleaned.lastIndexOf("```");
+            if (fence >= 0) {
+                cleaned = cleaned.substring(0, fence);
+            }
+            cleaned = cleaned.trim();
+        }
+
+        int start = cleaned.indexOf('{');
+        int end = cleaned.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            return cleaned.substring(start, end + 1);
+        }
+        return cleaned;
+    }
+
     private int defaultTtl(MemoryRecord.MemoryType type) {
         return switch (type) {
             case USER -> 365 * 24 * 60 * 60;
@@ -482,6 +745,51 @@ public class HybridMemoryStore implements MemoryStore {
             case PROJECT -> 30 * 24 * 60 * 60;
             case SESSION -> 24 * 60 * 60;
         };
+    }
+
+    private MemoryRecord.MemoryType parseMemoryType(String type) {
+        if (type == null || type.isBlank()) {
+            return MemoryRecord.MemoryType.SESSION;
+        }
+        try {
+            return MemoryRecord.MemoryType.valueOf(type.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            String normalized = type.trim().toUpperCase(Locale.ROOT);
+            if (normalized.contains("SESSION")) {
+                return MemoryRecord.MemoryType.SESSION;
+            }
+            if (normalized.contains("PROJECT")) {
+                return MemoryRecord.MemoryType.PROJECT;
+            }
+            if (normalized.contains("GLOBAL")) {
+                return MemoryRecord.MemoryType.GLOBAL;
+            }
+            if (normalized.contains("USER")) {
+                return MemoryRecord.MemoryType.USER;
+            }
+            return MemoryRecord.MemoryType.SESSION;
+        }
+    }
+
+    private String normalizeAction(String action) {
+        if (action == null || action.isBlank()) {
+            return ACTION_ADD;
+        }
+        String normalized = action.trim().toUpperCase(Locale.ROOT);
+        return switch (normalized) {
+            case "ADD", "CREATE", "INSERT" -> ACTION_ADD;
+            case "UPDATE", "MERGE", "OVERWRITE" -> ACTION_UPDATE;
+            case "DELETE", "REMOVE", "FORGET" -> ACTION_DELETE;
+            case "NONE", "SKIP", "IGNORE" -> ACTION_NONE;
+            default -> ACTION_ADD;
+        };
+    }
+
+    private double clamp01(Double value, double fallback) {
+        if (value == null || value.isNaN()) {
+            return fallback;
+        }
+        return Math.max(0.0d, Math.min(1.0d, value));
     }
 
     private boolean compatible(MemoryRecord.MemoryType rawType, MemoryRecord.MemoryType existingType) {
@@ -494,6 +802,10 @@ public class HybridMemoryStore implements MemoryStore {
             return false;
         }
         return memory.getUpdateAt().plusSeconds(memory.getTtl()).isBefore(LocalDateTime.now());
+    }
+
+    private boolean notBlank(String value) {
+        return value != null && !value.isBlank();
     }
 
     private void rememberHit(Map<String, Object> meta, Object runId) {
@@ -514,6 +826,17 @@ public class HybridMemoryStore implements MemoryStore {
         meta.put("distinctHitCount", ids.size());
     }
 
+    private Map<String, Object> mergeMeta(Map<String, Object> oldMeta, Map<String, Object> newMeta) {
+        Map<String, Object> merged = new HashMap<>();
+        if (oldMeta != null) {
+            merged.putAll(oldMeta);
+        }
+        if (newMeta != null) {
+            merged.putAll(newMeta);
+        }
+        return merged;
+    }
+
     private int intValue(Object value, int defaultValue) {
         if (value instanceof Number number) {
             return number.intValue();
@@ -531,36 +854,5 @@ public class HybridMemoryStore implements MemoryStore {
     private void promoteType(MemoryRecord target, MemoryRecord.MemoryType newType) {
         target.setType(newType);
         target.setTtl(defaultTtl(newType));
-    }
-
-    /**
-     * 规则抽取候选记忆。
-     *
-     * <p>TODO: 这里可以替换为 ReActAgent / ChatClient 结构化输出，由模型判断：
-     * 1. 是否值得长期保存；2. 保存类型；3. 是新增还是覆盖/合并；4. 是否需要摘要。
-     */
-    private RawMemories extractMemory(List<Message> messages, String runId){
-        RunnableConfig runnableConfig = RunnableConfig.builder()
-                .threadId(runId + "_MEMORY")
-                .build();
-        String userMsg = PromptConfig.MEMORY_USER.replace("{messagesJson}", messages.toString());
-        try {
-            AssistantMessage call = memoryAgent.call(userMsg, runnableConfig);
-            ObjectMapper mapper = new ObjectMapper();
-            return mapper.readValue(call.getText(), RawMemories.class);
-        } catch (GraphRunnerException | JsonProcessingException e){
-            throw new RuntimeException(e);
-        }
-    }
-
-
-    private record ScoredMemory(
-            MemoryRecord memory,
-            double score,
-            double cosineScore
-    ) {
-        ScoredMemory(MemoryRecord memory, double score) {
-            this(memory, score, 0.0);
-        }
     }
 }

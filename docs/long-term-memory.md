@@ -65,37 +65,62 @@ void save(List<Message> messages, String runId)
 
 ```text
 1. 接收最近一组 Spring AI Message
-2. 过滤不适合长期记忆的消息：
-   - SystemMessage
-   - ToolResponseMessage
-   - 带 toolCalls 的 AssistantMessage
-   - 空内容
-   - 过短内容
-3. 对候选内容做规则分类：
-   - 明确用户偏好 -> USER
-   - 明确项目/仓库 -> PROJECT
-   - 明确全局/跨项目 -> GLOBAL
-   - 其他默认 -> SESSION
-4. 使用 EmbeddingModel 生成向量
-5. 调用 tryHit：
-   - 命中旧记忆：strengthenMemory
+2. 使用 PromptConfig.MEMORY_PROMPT + memoryAgent 做结构化记忆抽取
+3. 输入给抽取 Agent 的内容：
+   - runId
+   - 近期 messages：type + text
+   - existingMemories：从 ES 中召回的少量相关旧记忆
+4. 抽取结果 RawMemories.memories 中每条包含：
+   - action: ADD / UPDATE / DELETE / NONE
+   - type: SESSION / PROJECT / GLOBAL / USER
+   - content: 原子化记忆正文
+   - scope: session_only / project / global / cross_session
+   - confidence / importance / ttlSeconds / tags / dedupeKey / existingMemoryId
+5. 根据 action 处理：
+   - NONE：跳过
+   - DELETE：按 existingMemoryId 删除 ES 文档
+   - UPDATE：按 existingMemoryId 覆盖旧记忆内容，并保留/累加部分强化状态
+   - ADD：转换为 MemoryRecord 后进入 saveInternal
+6. ADD 保存时：
+   - 先 tryHit
+   - 命中：strengthenMemory
    - 未命中：indexMemory 新建记忆
 ```
 
-注意：当前分类是规则版本，后续应替换为 ReActAgent / ChatClient 结构化输出。
+注意：写入失败会记录 `AUDIT_MEMORY_SAVE_FAILED` 日志，但不向外抛出，避免长期记忆能力影响主 Agent 会话稳定性。
 
-## 5. 关键词粗分类规则
+## 5. 抽取 Agent 提示词
 
-当前简化规则：
+长期记忆抽取 prompt 位于：
 
 ```text
-USER：以后都、长期、一直、记住我、我的偏好、我喜欢、我讨厌、我不喜欢
-PROJECT：这个项目、本仓库、当前仓库、项目约定、项目用、项目使用
-GLOBAL：全局、所有项目、通用、跨项目
-SESSION：其他默认
+src/main/java/com/agentcode/config/PromptConfig.java
 ```
 
-这些规则只是第一版兜底，不替代最终 Agent 分类。
+其中：
+
+```text
+MEMORY_PROMPT：定义输出 JSON、分类规则、保存边界、敏感信息过滤
+MEMORY_USER：传入 runId、messages、existingMemories
+```
+
+抽取 Agent 的主要分类原则：
+
+```text
+USER：明确表达长期个人偏好、习惯、技能、跨会话约束
+PROJECT：项目/仓库约定、技术栈、项目踩坑经验
+GLOBAL：跨项目通用经验，但不一定是用户偏好
+SESSION：只在当前会话/任务内有意义的临时信息
+```
+
+默认不保存：
+
+```text
+1. 单纯提问但没有形成稳定事实
+2. 工具调用中间日志
+3. 原始错误栈，除非已经总结成可复用结论
+4. 密码、token、密钥、个人隐私
+5. 临时执行意图，没有长期价值
 
 ## 6. tryHit 命中策略
 
@@ -281,6 +306,8 @@ rank.rrf 负责融合排序
 
 ## 13. 配置项
 
+### Elasticsearch
+
 `application.yml` 当前支持：
 
 ```yaml
@@ -290,6 +317,56 @@ spring:
     connection-timeout: ${ES_CONNECTION_TIMEOUT:5s}
     socket-timeout: ${ES_SOCKET_TIMEOUT:30s}
 ```
+
+### 向量模型
+
+`HybridMemoryStore` 需要 Spring AI 的 `EmbeddingModel`。如果项目同时引入 OpenAI 和 DashScope starter，需要显式选择 embedding provider。
+
+OpenAI 向量模型：
+
+```yaml
+spring:
+  ai:
+    model:
+      embedding: openai
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      embedding:
+        options:
+          model: text-embedding-3-small
+          dimensions: 1536
+```
+
+DashScope 向量模型：
+
+```yaml
+spring:
+  ai:
+    model:
+      embedding: dashscope
+    dashscope:
+      api-key: ${DASHSCOPE_API_KEY}
+      embedding:
+        options:
+          model: text-embedding-v3
+          dimensions: 1024
+```
+
+对应环境变量：
+
+```text
+AI_EMBEDDING_MODEL_PROVIDER=openai 或 dashscope
+OPENAI_API_KEY=...
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_EMBEDDING_DIMENSIONS=1536
+DASHSCOPE_API_KEY=...
+DASHSCOPE_EMBEDDING_MODEL=text-embedding-v3
+DASHSCOPE_EMBEDDING_DIMENSIONS=1024
+```
+
+`ensureIndex()` 创建 ES 索引时会调用 `embeddingModel.dimensions()`。如果模型维度探测失败，代码默认回退到 `1536`。因此建议显式配置和实际 embedding 模型一致的维度。
+
+### 排除 Spring AI VectorStore 自动装配
 
 当前暂时排除 Spring AI Elasticsearch VectorStore 自动装配：
 
@@ -304,15 +381,15 @@ spring:
 
 ## 14. 已知不足
 
-当前第一版仍有以下不足：
+当前实现仍有以下不足：
 
 ```text
-1. 记忆分类仍是关键词规则，未接入 ReActAgent / ChatClient 结构化输出
-2. projectId / sessionId / workspace 尚未完整建模
-3. 记忆去重主要依赖 cosine + type，还没有 dedupeKey
-4. 升级阈值使用 distinctHitCount，还不够业务化
-5. 尚未接入会话生命周期自动 save
-6. 尚未把 search 注册为 Agent 的 memory_search 工具
+1. projectId / sessionId / workspace 尚未完整建模
+2. memory_search 工具尚未注册给主 Agent
+3. save 尚未由会话生命周期 Hook 自动触发
+4. existingMemories 目前只召回少量相关旧记忆，还没有按 scope 精细裁剪
+5. 记忆去重主要依赖 cosine + type，dedupeKey 还只存在 meta，未成为 ES 一等索引字段
+6. 升级阈值使用 distinctHitCount，还不够业务化
 7. 尚未实现并发多路记忆搜索与统一超时控制
 ```
 
@@ -324,7 +401,7 @@ spring:
 1. 给 Agent 注册 memory_search 工具
 2. 在会话结束后调用 MemoryStore.save(messages, runId)
 3. 在 meta 中补充 workspace / projectId / sessionId
-4. 引入 ReActAgent 或轻量 ChatClient 结构化输出做记忆抽取
+4. 将 dedupeKey 提升为 MemoryRecord / ES 顶层字段
 ```
 
 中期：

@@ -311,9 +311,15 @@ public class PromptConfig {
             """;
 
     public static final String MEMORY_USER = """            
-            最近对话消息：
+            以下是本次长期记忆抽取的输入 JSON：
             {messagesJson}
-            
+
+            说明：
+            - messages：近期 Spring AI Message，只包含 type 和 text
+            - existingMemories：ES 中召回的少量相关旧记忆，可能为空
+            - 如果输入足以修正/覆盖 existingMemories，请返回 UPDATE，并给出 existingMemoryId
+            - 如果只是临时上下文，请返回 NONE 或空 memories
+
             请分析以上信息，只输出符合 system 要求的 JSON
             """;
 }

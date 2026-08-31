@@ -35,6 +35,9 @@ spring:
     model:
       # openai / dashscope / anthropic / ollama
       chat: ${AI_MODEL_PROVIDER:openai}
+      # 长期记忆 HybridMemoryStore 需要 EmbeddingModel。
+      # 如果同时引入 OpenAI / DashScope starter，必须显式选择 embedding 模型 provider。
+      embedding: ${AI_EMBEDDING_MODEL_PROVIDER:openai}
 
     openai:
       api-key: ${OPENAI_API_KEY:}
@@ -44,6 +47,10 @@ spring:
           model: ${OPENAI_CHAT_MODEL:gpt-4o-mini}
           temperature: ${OPENAI_TEMPERATURE:0.7}
           max-tokens: ${OPENAI_MAX_TOKENS:8192}
+      embedding:
+        options:
+          model: ${OPENAI_EMBEDDING_MODEL:text-embedding-3-small}
+          dimensions: ${OPENAI_EMBEDDING_DIMENSIONS:1536}
 
     dashscope:
       api-key: ${DASHSCOPE_API_KEY:}
@@ -55,6 +62,10 @@ spring:
           top-p: ${DASHSCOPE_TOP_P:0.8}
           max-tokens: ${DASHSCOPE_MAX_TOKENS:8192}
           stop: ${DASHSCOPE_STOP:}
+      embedding:
+        options:
+          model: ${DASHSCOPE_EMBEDDING_MODEL:text-embedding-v3}
+          dimensions: ${DASHSCOPE_EMBEDDING_DIMENSIONS:1024}
     chat:
       client:
         observation-enabled: ${AI_OBSERVATION_ENABLED:true}
