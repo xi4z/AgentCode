@@ -3,7 +3,9 @@ package com.agentcode.factory;
 import com.agentcode.agent.AgentContext;
 import com.agentcode.hooks.CheckpointAgentMetricsHook;
 import com.agentcode.hooks.CheckpointModelMetricsHook;
+import com.agentcode.hooks.MemoryHook;
 import com.agentcode.hooks.UpdateSessionNotesHook;
+import com.agentcode.memory.MemoryStore;
 import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.store.AgentContextStore;
 import com.alibaba.cloud.ai.graph.agent.hook.Hook;
@@ -31,9 +33,10 @@ public class AgentHookBuilder {
     private final ChatModel chatModel;
     private final AgentCodeProperties properties;
     private final AgentContextStore agentContextStore;
+    private final MemoryStore memoryStore;
 
     public Builder builder(AgentContext agentContext) {
-        return new Builder(chatModel, properties, agentContext, agentContextStore);
+        return new Builder(chatModel, properties, agentContext, agentContextStore, memoryStore);
     }
 
     public static class Builder {
@@ -44,12 +47,14 @@ public class AgentHookBuilder {
         private final String workspace;
         private final List<Hook> hooks = new ArrayList<>();
         private ShellTool2 shellTool2;
+        private final MemoryStore memoryStore;
 
-        private Builder(ChatModel chatModel, AgentCodeProperties properties, AgentContext agentContext, AgentContextStore store) {
+        private Builder(ChatModel chatModel, AgentCodeProperties properties, AgentContext agentContext, AgentContextStore store, MemoryStore memoryStore) {
             this.chatModel = chatModel;
             this.properties = properties;
             this.store = store;
             this.workspace = agentContext.getWorkspace();
+            this.memoryStore = memoryStore;
         }
 
 
@@ -109,6 +114,12 @@ public class AgentHookBuilder {
                         .build());
             }
             hooks.add(hitlBuilder.build());
+            return this;
+        }
+
+        public Builder withMemory(){
+            MemoryHook memoryHook = new MemoryHook(memoryStore);
+            hooks.add(memoryHook);
             return this;
         }
 
