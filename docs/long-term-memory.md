@@ -304,6 +304,23 @@ rank.rrf 负责融合排序
 
 `tryHit` 中会额外调用一次纯 kNN，用来拿真实 cosineScore。
 
+### type 过滤必须挂两处（已修复的坑）
+
+外层 `query.bool.filter` 里的 `type` 过滤 **不会作用于 `knn` 子句**，
+`knn` 有自己独立的 `filter`。只写外层时，向量那一腿会跨类型召回，
+"分层召回 SESSION / PROJECT / GLOBAL / USER" 名存实亡。
+
+实测（同一条 USER 记忆与一条语义相近的 PROJECT 记忆，外层 `filter(type=USER)`）：
+
+```text
+knn 带 filter    -> hits = [p-user-1]                 正确
+knn 不带 filter  -> hits = [p-user-1, p-proj-1]       跨类型泄漏
+```
+
+因此 `hybridSearchByType()` 在 `query` 与 `knn` 上各挂一份 type 过滤
+（`type == null` 时两边都不加，供 `collectExistingMemories()` 跨类型取上下文）。
+`scripts/memory-smoke.py` 的 [5] 与 Java 探针都把这条保留了回归断言。
+
 ## 13. 配置项
 
 ### Elasticsearch
@@ -318,11 +335,57 @@ spring:
     socket-timeout: ${ES_SOCKET_TIMEOUT:30s}
 ```
 
+本地容器由 `scripts/es-up.sh` 负责（无账号密码认证）：
+
+```bash
+scripts/es-up.sh                       # 默认容器名 es01 / 端口 9200 / 镜像 8.15.3
+ES_CONTAINER=es-test ES_PORT=9201 scripts/es-up.sh
+```
+
+脚本做四件事，都是实测出来的必要项：
+
+1. 单节点 + `xpack.security.enabled=false`，不启用账号密码
+2. `--restart unless-stopped`：否则宿主机重启后容器变成 `Exited(255)`，
+   表面症状是"记忆模块连不上 localhost:9200"，很容易误判成代码问题
+3. **激活 30 天 trial license**：`rank.rrf`（混排）和近似 `knn`（dense_vector）
+   在 ES 里属于企业级特性，默认 `basic` license 下会直接返回
+   `403 security_exception: current license is non-compliant for [Reciprocal Rank Fusion (RRF)]`，
+   即 `hybridSearchByType()` 与 `vectorSearch()` 两条腿全挂。trial 每个集群只能激活一次，
+   重复调用返回 403 属正常
+4. 建 `agent_memory*` 索引模板设 `number_of_replicas=0`：单节点默认 1 副本永远分配不出来，
+   索引会卡在 yellow。（`_cluster/settings` 里写 `index.number_of_replicas` /
+   `archival.index.number_of_replicas` 在 8.15 都被拒绝，只能走索引模板）
+
 ### 向量模型
 
 `HybridMemoryStore` 需要 Spring AI 的 `EmbeddingModel`。如果项目同时引入 OpenAI 和 DashScope starter，需要显式选择 embedding provider。
 
-OpenAI 向量模型：
+**base-url 陷阱（必须注意）**：`DashScopeApi` 用 `baseUrl + embeddingsPath` 拼请求地址，
+而 `embeddingsPath` 常量本身已经带 `/api/v1`：
+
+```text
+/api/v1/services/embeddings/text-embedding/text-embedding
+```
+
+所以 `spring.ai.dashscope.base-url` **只能填主机，不能带 `/api/v1`**。
+带上了会拼成 `/api/v1/api/v1/services/...`，实测报
+`NonTransientAiException: 404`（公共端点和专属 MaaS 实例都一样）。
+
+```yaml
+spring:
+  ai:
+    model:
+      embedding: dashscope
+    dashscope:
+      api-key: ${DASHSCOPE_API_KEY}
+      base-url: https://ws-xxxx.cn-beijing.maas.aliyuncs.com   # 不带 /api/v1
+      embedding:
+        options:
+          model: qwen3.7-text-embedding
+          dimensions: 1024
+```
+
+OpenAI 向量模型的等价配置：
 
 ```yaml
 spring:
@@ -337,22 +400,7 @@ spring:
           dimensions: 1536
 ```
 
-DashScope 向量模型：
-
-```yaml
-spring:
-  ai:
-    model:
-      embedding: dashscope
-    dashscope:
-      api-key: ${DASHSCOPE_API_KEY}
-      embedding:
-        options:
-          model: text-embedding-v3
-          dimensions: 1024
-```
-
-对应环境变量：
+对应环境变量（推荐写进 `.env`，用 `scripts/with-env.sh` 注入，Spring Boot 不会自己读 `.env`）：
 
 ```text
 AI_EMBEDDING_MODEL_PROVIDER=openai 或 dashscope
@@ -360,11 +408,50 @@ OPENAI_API_KEY=...
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 OPENAI_EMBEDDING_DIMENSIONS=1536
 DASHSCOPE_API_KEY=...
-DASHSCOPE_EMBEDDING_MODEL=text-embedding-v3
+DASHSCOPE_BASE_URL=...            # 不含 /api/v1
+DASHSCOPE_EMBEDDING_MODEL=qwen3.7-text-embedding
 DASHSCOPE_EMBEDDING_DIMENSIONS=1024
 ```
 
-`ensureIndex()` 创建 ES 索引时会调用 `embeddingModel.dimensions()`。如果模型维度探测失败，代码默认回退到 `1536`。因此建议显式配置和实际 embedding 模型一致的维度。
+`ensureIndex()` 创建 ES 索引时会调用 `embeddingModel.dimensions()`。
+注意 `DashScopeEmbeddingModel` 没有覆写 `dimensions()`，走的是
+`AbstractEmbeddingModel` 的实现：**真实发一次 embedding 请求来探测维度**，
+所以它会吃 API Key / base-url 配置的影响。探测失败时代码回退 `1536`，
+与 1024 维模型不匹配会让 kNN 直接报错，因此必须显式配置一致的维度。
+现在回退时会打 `AUDIT_MEMORY_EMBEDDING_DIMS_PROBE_FAILED` /
+`AUDIT_MEMORY_EMBEDDING_DIMS_UNKNOWN` 两行告警，不再静默。
+
+实测数据（`qwen3.7-text-embedding`，2026-09-01）：
+
+```text
+embed() 输出维度        = 1024
+dimensions() 探测结果   = 1024（与 embed() 一致）
+```
+
+### 关闭未使用的 OpenAI 子模型
+
+`spring.ai.model.chat` / `embedding` 只控制这两类。
+`spring-ai-starter-model-openai` 里 audio / image / moderation 的自动装配各自独立生效，
+未显式关闭时即使全部走 dashscope，也会因为 `spring.ai.openai.api-key` 为空而启动失败：
+
+```text
+OpenAI API key must be set. Use the connection property: spring.ai.openai.api-key
+  or spring.ai.openai.speech.api-key property.
+（bean: openAiAudioSpeechModel）
+```
+
+`application.yml` 已固定为：
+
+```yaml
+spring:
+  ai:
+    model:
+      image: ${AI_IMAGE_MODEL:none}
+      moderation: ${AI_MODERATION_MODEL:none}
+      audio:
+        speech: ${AI_AUDIO_SPEECH_MODEL:none}
+        transcription: ${AI_AUDIO_TRANSCRIPTION_MODEL:none}
+```
 
 ### 排除 Spring AI VectorStore 自动装配
 
@@ -379,7 +466,117 @@ spring:
 
 原因：当前 `HybridMemoryStore` 自己管理 `agent_memory` 索引，避免和 Spring AI VectorStore 的默认索引冲突。
 
-## 14. 已知不足
+## 14. 本地环境与冒烟验证
+
+一键跑通顺序：
+
+```bash
+# 1. ES（无认证 + trial license + RRF 能力探测）
+scripts/es-up.sh
+
+# 2. 记忆链路冒烟（不依赖 Spring 启动，直连真模型 + 真 ES）
+scripts/with-env.sh python3 scripts/memory-smoke.py
+
+# 3. 启动应用（.env 通过 with-env.sh 注入进程环境）
+scripts/with-env.sh mvn -o -Dmaven.repo.local=../.m2repo spring-boot:run
+
+# 4. 验证 ES 客户端真的连通
+curl -s localhost:8080/actuator/health | jq .components.elasticsearch
+```
+
+`scripts/memory-smoke.py` 校验的是 `HybridMemoryStore` 依赖的外部事实，7 组断言：
+
+```text
+[1] ES 可达 + 版本支持 rank.rrf（>= 8.11）
+[2] 向量模型可调用、维度与配置一致
+[3] 用 ensureIndex() 同样的 mapping 建索引，确认 dense_vector/cosine/dims
+[4] BM25(query.bool) + kNN + rank.rrf 混排能命中
+[5] type 隔离回归：缺 knn.filter 会被向量腿跨类型打穿（脚本内含反证步骤）
+[6] 纯 kNN 返回 cosine 分数，且落在 [0,1]、语义更近者分数更高
+[7] partial update 不丢向量与正文（对应 strengthenMemory -> updateMemory）
+```
+
+写脚本时踩到两个坑，值得记住：
+
+1. ES 8.x 拒绝缺少/错误的 `Content-Type`，会返回
+   `406 Content-Type header [application/x-www-form-urlencoded] is not supported`
+2. `POST /_refresh` **不接受 request body**，带 `-d '{}'` 会 400 且容易被忽略；
+   结果就是写完立刻查会拿到 0 命中，看起来像"检索逻辑坏了"
+
+`tryHit` 阈值校准参考（同一模型、真实 cosine）：
+
+```text
+"包管理器用什么" vs "用户偏好使用 pnpm 而不是 npm 管理依赖"  cosine = 0.8207
+"包管理器用什么" vs "这个项目使用 Java 17 和 Spring Boot 3.5"  cosine = 0.7050
+```
+
+即语义相关但表述不同的两条记忆，cosine 会落在 `MATCH_THRESHOLD = 0.85` 之下。
+这意味着 `tryHit` 可能偏严（该合并的没合并，导致重复记忆堆积），
+后续做记忆测试时如果发现重复条目，先怀疑这个阈值而不是抽取 prompt。
+
+## 15. 审计日志（AUDIT_MEMORY_*）
+
+沿用项目既有的 `AUDIT_<事件> k=v k=v` 约定（与 `AuditedChatModel`、
+`ToolMetricsInterceptor` 一致），`HybridMemoryStore` 用 `@Slf4j` 的 `log.info`
+记录关键记忆动作，正文一律经 `brief()` 压成单行并截断（默认 120 字符），
+保证可 grep、可回放。
+
+写入链路（`save`）：
+
+| 事件 | 级别 | 含义 |
+| --- | --- | --- |
+| `AUDIT_MEMORY_INDEX_CREATED` | info | 首次建 `agent_memory` 索引，含 dims/similarity |
+| `AUDIT_MEMORY_INDEX_READY` | info | 索引已存在（不重复探测维度，避免多余 API 调用） |
+| `AUDIT_MEMORY_EMBEDDING_READY` | info | 探测到的 embedding 维度 |
+| `AUDIT_MEMORY_EMBEDDING_DIMS_UNKNOWN` / `_PROBE_FAILED` | warn | 维度探测失败并回退 1536 |
+| `AUDIT_MEMORY_EXTRACT` | info | 抽取结果条数（`extracted=0` 表示本轮没记住任何东西） |
+| `AUDIT_MEMORY_EXTRACT_AGENT` | info | 抽取 Agent 调用耗时与条数 |
+| `AUDIT_MEMORY_EXTRACT_RAW` | debug | 抽取 Agent 原始输出，定位"为什么没记住" |
+| `AUDIT_MEMORY_EXTRACT_EMPTY` / `_PARSE_FAILED` / `_FAILED` | info/warn | 空输出 / JSON 解析失败 / 各阶段异常（stage 区分 agent、prompt、existingMemories） |
+| `AUDIT_MEMORY_EXTRACT_CONTEXT` | debug | 喂给抽取 Agent 的旧记忆条数，决定 ADD 还是 UPDATE |
+| `AUDIT_MEMORY_APPLY` | info | 每条抽取结果的决策落库前记录：action/type/memoryId/confidence/ttl/dedupeKey/content |
+| `AUDIT_MEMORY_TRY_HIT` | info/debug | 命中记 info（含 cosine、threshold、rrfScore），未命中候选记 debug |
+| `AUDIT_MEMORY_ADD` | info | 新建记忆（含 ES 返回的 esResult） |
+| `AUDIT_MEMORY_UPDATE` | info | 覆盖更新，同时记录 oldContent 与 newContent |
+| `AUDIT_MEMORY_UPDATE_FALLBACK_ADD` | info | 抽取给了 existingMemoryId 但库里查不到，退化为按该 id 新建 |
+| `AUDIT_MEMORY_STRENGTHEN` | info | 命中强化：hitCount / distinctHits / confidence 前后值 / 是否升级 |
+| `AUDIT_MEMORY_PROMOTE` | info | 类型升级 SESSION->PROJECT->GLOBAL->USER |
+| `AUDIT_MEMORY_DELETE` | info | 删除记忆 |
+| `AUDIT_MEMORY_SKIP` | info/warn | 因 action=DELETE 缺 id、正文为空、向量为空而跳过 |
+| `AUDIT_MEMORY_SAVE_DONE` | info | 本轮汇总：extracted / applied / durationMs |
+| `AUDIT_MEMORY_SAVE_FAILED` | warn | 整体失败（不外抛，避免拖垮主会话） |
+
+召回链路（`search`）：
+
+| 事件 | 级别 | 含义 |
+| --- | --- | --- |
+| `AUDIT_MEMORY_SEARCH` | info | query、candidates、returned、topHits 采样、byType 统计、耗时 |
+| `AUDIT_MEMORY_SEARCH_FAILED` / `_SKIPPED` | warn | ES 异常 / 向量为空 |
+| `AUDIT_MEMORY_LAYER_SESSION_DROPPED` | debug | SESSION 最高 cosine 低于 0.72 被整体丢弃 |
+| `AUDIT_MEMORY_LAYER_QUOTA` | debug | 分层配额分配结果 |
+| `AUDIT_MEMORY_EMBED` / `_EMPTY` / `_FAILED` | debug/warn | 单次 embedding 调用的维度与耗时 |
+
+常用排查命令：
+
+```bash
+# 一次会话里记忆相关的完整时间线
+grep -aoE 'AUDIT_MEMORY_[A-Z_]+' logs/agentcode.log | sort | uniq -c | sort -rn
+
+# 只看真正落库的记忆动作
+grep -a 'AUDIT_MEMORY_\(ADD\|UPDATE\|STRENGTHEN\|PROMOTE\|DELETE\)' logs/agentcode.log
+
+# 追某一条记忆的终身轨迹
+grep -a 'memoryId=<id 前 8 位>' logs/agentcode.log
+
+# 按 runId 串起一次会话
+grep -a "AUDIT_MEMORY_.*runId=<runId>" logs/agentcode.log
+```
+
+`com.agentcode` 默认 `DEBUG`（`AGENT_LOG_LEVEL`），因此 `tryHit` 的逐候选打分、
+embedding 耗时等细节日志本地默认可见；生产上如嫌吵可只调
+`logging.level.com.agentcode.memory=INFO`，`log.isDebugEnabled()` 已做保护。
+
+## 16. 已知不足
 
 当前实现仍有以下不足：
 
@@ -391,9 +588,13 @@ spring:
 5. 记忆去重主要依赖 cosine + type，dedupeKey 还只存在 meta，未成为 ES 一等索引字段
 6. 升级阈值使用 distinctHitCount，还不够业务化
 7. 尚未实现并发多路记忆搜索与统一超时控制
+8. MATCH_THRESHOLD = 0.85 偏严：实测语义相关但表述不同的两条记忆 cosine 只有 0.82，
+   会导致该强化的没强化、重复记忆堆积（见 14 节实测数据）
+9. 依赖 ES trial/企业 license：basic license 下 RRF 与近似 kNN 直接 403，
+   部署环境若为 basic 需要改成 script_score 精确向量检索 + 客户端 RRF
 ```
 
-## 15. 下一步建议
+## 17. 下一步建议
 
 短期：
 

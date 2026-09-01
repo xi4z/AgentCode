@@ -59,6 +59,14 @@ public class HybridMemoryStore implements MemoryStore {
     private static final double MATCH_THRESHOLD = 0.85;
     private static final double SESSION_QUALITY_THRESHOLD = 0.72;
 
+    /**
+     * 审计日志约定：事件名统一用 AUDIT_MEMORY_* 前缀，字段用 k=v，正文用 content="..." 包住。
+     * 记忆正文可能含换行与超长文本，一律经 brief() 压成单行并截断，保证日志可 grep、可回放。
+     */
+    private static final int AUDIT_CONTENT_MAX_LENGTH = 120;
+    private static final int AUDIT_HIT_CONTENT_MAX_LENGTH = 40;
+    private static final int AUDIT_HIT_SAMPLE = 5;
+
     private static final String ACTION_ADD = "ADD";
     private static final String ACTION_UPDATE = "UPDATE";
     private static final String ACTION_DELETE = "DELETE";
@@ -92,15 +100,24 @@ public class HybridMemoryStore implements MemoryStore {
         }
         ensureIndex();
 
+        long start = System.nanoTime();
         try {
             RawMemories memories = extractMemory(messages, runId);
-            if (memories == null || memories.getMemories() == null) {
-                return;
+            List<RawMemories.RawMemory> extracted =
+                    (memories == null || memories.getMemories() == null) ? List.of() : memories.getMemories();
+
+            log.info("AUDIT_MEMORY_EXTRACT runId={} messages={} extracted={}",
+                    runId, messages.size(), extracted.size());
+
+            int applied = 0;
+            for (RawMemories.RawMemory rawMemory : extracted) {
+                if (applyRawMemory(rawMemory, runId)) {
+                    applied++;
+                }
             }
 
-            for (RawMemories.RawMemory rawMemory : memories.getMemories()) {
-                applyRawMemory(rawMemory, runId);
-            }
+            log.info("AUDIT_MEMORY_SAVE_DONE runId={} extracted={} applied={} durationMs={}",
+                    runId, extracted.size(), applied, (System.nanoTime() - start) / 1_000_000);
         } catch (Exception e) {
             // 记忆写入失败不应该打断主 Agent 会话流程。
             log.warn("AUDIT_MEMORY_SAVE_FAILED runId={} error={}", runId, e.getMessage(), e);
@@ -114,53 +131,74 @@ public class HybridMemoryStore implements MemoryStore {
         }
         ensureIndex();
 
+        long start = System.nanoTime();
         List<Float> vector = embed(content);
         if (vector.isEmpty()) {
+            log.warn("AUDIT_MEMORY_SEARCH_SKIPPED reason=emptyEmbedding query=\"{}\"", brief(content));
             return List.of();
         }
 
         try {
             List<ScoredMemory> candidates = layeredSearch(content, vector, DEFAULT_SEARCH_TOP_K);
-            return reRank(candidates);
+            List<MemoryRecord> result = reRank(candidates);
+            log.info("AUDIT_MEMORY_SEARCH query=\"{}\" dims={} candidates={} returned={} topHits={} byType={} durationMs={}",
+                    brief(content), vector.size(), candidates.size(), result.size(),
+                    summarize(result), countByType(result),
+                    (System.nanoTime() - start) / 1_000_000);
+            return result;
         } catch (IOException e) {
+            log.warn("AUDIT_MEMORY_SEARCH_FAILED query=\"{}\" error={}", brief(content), e.getMessage(), e);
             throw new RuntimeException("Search agent memory failed", e);
         }
     }
 
-    private void applyRawMemory(RawMemories.RawMemory rawMemory, String runId) {
+    private boolean applyRawMemory(RawMemories.RawMemory rawMemory, String runId) {
         if (rawMemory == null) {
-            return;
+            return false;
         }
 
         String action = normalizeAction(rawMemory.getAction());
 
         if (ACTION_NONE.equals(action)) {
-            return;
+            return false;
         }
 
         if (ACTION_DELETE.equals(action)) {
             if (notBlank(rawMemory.getExistingMemoryId())) {
                 deleteMemory(rawMemory.getExistingMemoryId());
+                return true;
             }
-            return;
+            log.info("AUDIT_MEMORY_SKIP runId={} action={} reason=missingExistingMemoryId", runId, action);
+            return false;
         }
 
         if (!notBlank(rawMemory.getContent())) {
-            return;
+            log.info("AUDIT_MEMORY_SKIP runId={} action={} reason=emptyContent", runId, action);
+            return false;
         }
 
         MemoryRecord candidate = toMemoryRecord(rawMemory, runId, action);
         List<Float> vector = embed(candidate.getContent());
         if (vector.isEmpty()) {
-            return;
+            log.warn("AUDIT_MEMORY_SKIP runId={} action={} reason=emptyEmbedding memoryId={}",
+                    runId, action, candidate.getMemoryId());
+            return false;
         }
+
+        // 抽取 Agent 的决策是本模块最关键的审计点：一条记忆写库前先落一行决策记录。
+        log.info("AUDIT_MEMORY_APPLY runId={} action={} type={} memoryId={} confidence={} ttl={} dedupeKey={} existingMemoryId={} content=\"{}\"",
+                runId, action, candidate.getType(), candidate.getMemoryId(),
+                num(candidate.getConfidence()), candidate.getTtl(),
+                candidate.getMeta().get("dedupeKey"), rawMemory.getExistingMemoryId(),
+                brief(candidate.getContent()));
 
         if (ACTION_UPDATE.equals(action) && notBlank(rawMemory.getExistingMemoryId())) {
             updateExistingMemory(candidate, rawMemory.getExistingMemoryId(), vector);
-            return;
+            return true;
         }
 
         saveInternal(candidate, vector);
+        return true;
     }
 
     /**
@@ -185,8 +223,14 @@ public class HybridMemoryStore implements MemoryStore {
             if (tryHit(candidate, vector)) {
                 return;
             }
-            indexMemory(candidate, vector);
+            String esResult = indexMemory(candidate, vector);
+            log.info("AUDIT_MEMORY_ADD memoryId={} runId={} type={} confidence={} ttl={} dims={} esResult={} content=\"{}\"",
+                    candidate.getMemoryId(), metaValue(candidate, "runId"), candidate.getType(),
+                    num(candidate.getConfidence()), candidate.getTtl(), vector.size(), esResult,
+                    brief(candidate.getContent()));
         } catch (IOException e) {
+            log.warn("AUDIT_MEMORY_ADD_FAILED memoryId={} runId={} error={}",
+                    candidate.getMemoryId(), metaValue(candidate, "runId"), e.getMessage(), e);
             throw new RuntimeException("Save agent memory failed", e);
         }
     }
@@ -214,6 +258,8 @@ public class HybridMemoryStore implements MemoryStore {
                     MemoryRecord.class
             );
         } catch (IOException e) {
+            log.warn("AUDIT_MEMORY_UPDATE_FAILED memoryId={} error={}",
+                    memory.getMemoryId(), e.getMessage(), e);
             throw new RuntimeException("Update agent memory failed", e);
         }
     }
@@ -221,15 +267,22 @@ public class HybridMemoryStore implements MemoryStore {
     private void updateExistingMemory(MemoryRecord candidate, String existingMemoryId, List<Float> vector) {
         MemoryRecord existing = getMemory(existingMemoryId);
         if (existing == null) {
+            // 抽取 Agent 给了 existingMemoryId 但库里查不到：退化成按该 id 新建，保留 id 便于后续对齐。
             candidate.setMemoryId(existingMemoryId);
             try {
-                indexMemory(candidate, vector);
+                String esResult = indexMemory(candidate, vector);
+                log.info("AUDIT_MEMORY_UPDATE_FALLBACK_ADD memoryId={} runId={} type={} esResult={} content=\"{}\"",
+                        existingMemoryId, metaValue(candidate, "runId"), candidate.getType(), esResult,
+                        brief(candidate.getContent()));
             } catch (IOException e) {
+                log.warn("AUDIT_MEMORY_UPDATE_FAILED memoryId={} error={}",
+                        existingMemoryId, e.getMessage(), e);
                 throw new RuntimeException("Update agent memory failed", e);
             }
             return;
         }
 
+        String oldContent = existing.getContent();
         existing.setMemoryId(existingMemoryId);
         existing.setContent(candidate.getContent());
         existing.setType(candidate.getType());
@@ -246,16 +299,24 @@ public class HybridMemoryStore implements MemoryStore {
 
         try {
             // content_vector 已变化，使用全量 index 覆盖，避免旧向量残留。
-            indexMemory(existing, vector);
+            String esResult = indexMemory(existing, vector);
+            log.info("AUDIT_MEMORY_UPDATE memoryId={} runId={} type={} confidence={} hitCount={} esResult={} oldContent=\"{}\" newContent=\"{}\"",
+                    existingMemoryId, metaValue(existing, "runId"), existing.getType(),
+                    num(existing.getConfidence()), existing.getHitCount(), esResult,
+                    brief(oldContent), brief(existing.getContent()));
         } catch (IOException e) {
+            log.warn("AUDIT_MEMORY_UPDATE_FAILED memoryId={} error={}",
+                    existingMemoryId, e.getMessage(), e);
             throw new RuntimeException("Update agent memory failed", e);
         }
     }
 
     private void deleteMemory(String memoryId) {
         try {
-            esClient.delete(d -> d.index(INDEX_NAME).id(memoryId));
+            var response = esClient.delete(d -> d.index(INDEX_NAME).id(memoryId));
+            log.info("AUDIT_MEMORY_DELETE memoryId={} esResult={}", memoryId, response.result().name());
         } catch (IOException e) {
+            log.warn("AUDIT_MEMORY_DELETE_FAILED memoryId={} error={}", memoryId, e.getMessage(), e);
             throw new RuntimeException("Delete agent memory failed", e);
         }
     }
@@ -264,6 +325,7 @@ public class HybridMemoryStore implements MemoryStore {
         try {
             return esClient.get(g -> g.index(INDEX_NAME).id(memoryId), MemoryRecord.class).source();
         } catch (IOException e) {
+            log.warn("AUDIT_MEMORY_GET_FAILED memoryId={} error={}", memoryId, e.getMessage(), e);
             throw new RuntimeException("Get agent memory failed", e);
         }
     }
@@ -272,6 +334,9 @@ public class HybridMemoryStore implements MemoryStore {
         if (target == null) {
             return;
         }
+
+        MemoryRecord.MemoryType typeBefore = target.getType();
+        double confidenceBefore = target.getConfidence();
 
         target.setHitCount(target.getHitCount() + 1);
 
@@ -296,6 +361,11 @@ public class HybridMemoryStore implements MemoryStore {
         }
 
         updateMemory(target);
+
+        log.info("AUDIT_MEMORY_STRENGTHEN memoryId={} runId={} hitCount={} distinctHits={} confidence={}->{} type={} promoted={} ttl={} content=\"{}\"",
+                target.getMemoryId(), metaValue(rawMemory, "runId"), target.getHitCount(), distinctHits,
+                num(confidenceBefore), num(target.getConfidence()), target.getType(),
+                typeBefore != target.getType(), target.getTtl(), brief(target.getContent()));
     }
 
     /**
@@ -304,6 +374,7 @@ public class HybridMemoryStore implements MemoryStore {
     private boolean tryHit(MemoryRecord memory, List<Float> vector) throws IOException {
         List<ScoredMemory> candidates = hybridSearchByType(memory.getContent(), HIT_TOP_K, vector, memory.getType());
         if (candidates.isEmpty()) {
+            log.debug("AUDIT_MEMORY_TRY_HIT memoryId={} candidates=0 result=MISS", memory.getMemoryId());
             return false;
         }
 
@@ -312,10 +383,19 @@ public class HybridMemoryStore implements MemoryStore {
             MemoryRecord existing = candidate.memory();
             double cosine = cosineScores.getOrDefault(existing.getMemoryId(), 0.0);
             if (cosine >= MATCH_THRESHOLD && compatible(memory.getType(), existing.getType())) {
+                log.info("AUDIT_MEMORY_TRY_HIT incomingId={} matchedId={} runId={} type={} cosine={} threshold={} rrfScore={} result=HIT",
+                        memory.getMemoryId(), existing.getMemoryId(), metaValue(memory, "runId"),
+                        memory.getType(), num(cosine), MATCH_THRESHOLD, num(candidate.esScore()));
                 strengthenMemory(memory, existing);
                 return true;
             }
+            if (log.isDebugEnabled()) {
+                log.debug("AUDIT_MEMORY_TRY_HIT incomingId={} candidateId={} candidateType={} cosine={} threshold={} compatible={} result=SKIP",
+                        memory.getMemoryId(), existing.getMemoryId(), existing.getType(),
+                        num(cosine), MATCH_THRESHOLD, compatible(memory.getType(), existing.getType()));
+            }
         }
+        log.debug("AUDIT_MEMORY_TRY_HIT incomingId={} candidates={} result=MISS", memory.getMemoryId(), candidates.size());
         return false;
     }
 
@@ -378,6 +458,8 @@ public class HybridMemoryStore implements MemoryStore {
                 .orElse(0.0);
 
         if (maxSessionCosine < SESSION_QUALITY_THRESHOLD) {
+            log.debug("AUDIT_MEMORY_LAYER_SESSION_DROPPED sessionCandidates={} maxCosine={} threshold={}",
+                    session.size(), num(maxSessionCosine), SESSION_QUALITY_THRESHOLD);
             session.clear();
         } else if (session.size() > SESSION_MAX_RESULTS) {
             session = new ArrayList<>(session.subList(0, SESSION_MAX_RESULTS));
@@ -394,6 +476,9 @@ public class HybridMemoryStore implements MemoryStore {
         int projectTopK = base + (extra > 0 ? 1 : 0);
         int globalTopK = base + (extra > 1 ? 1 : 0);
         int userTopK = base;
+
+        log.debug("AUDIT_MEMORY_LAYER_QUOTA sessionKept={} maxSessionCosine={} projectTopK={} globalTopK={} userTopK={}",
+                result.size(), num(maxSessionCosine), projectTopK, globalTopK, userTopK);
 
         if (projectTopK > 0) {
             result.addAll(hybridSearchByType(query, projectTopK, vector, MemoryRecord.MemoryType.PROJECT));
@@ -426,16 +511,23 @@ public class HybridMemoryStore implements MemoryStore {
         }
 
         int numCandidates = Math.max(100, topK * 10);
+        // 关键：knn 子句【不继承】外层 query 的 filter，必须在 knn 上再挂一次 type 过滤。
+        // 否则向量那一腿会跨类型召回，"分层召回 SESSION/PROJECT/GLOBAL/USER" 名存实亡
+        // （实测：外层 filter(type=USER) 时混排结果里仍出现 PROJECT 记忆）。
         SearchResponse<MemoryRecord> response = esClient.search(s -> s
                         .index(INDEX_NAME)
                         .source(src -> src.filter(f -> f.excludes("content_vector")))
                         .query(buildQuery(query, type))
-                        .knn(k -> k
-                                .field("content_vector")
-                                .queryVector(vector)
-                                .k(topK)
-                                .numCandidates(numCandidates)
-                        )
+                        .knn(k -> {
+                            var kb = k.field("content_vector")
+                                    .queryVector(vector)
+                                    .k(topK)
+                                    .numCandidates(numCandidates);
+                            if (type != null) {
+                                kb.filter(q -> q.term(t -> t.field("type").value(type.name())));
+                            }
+                            return kb;
+                        })
                         .rank(r -> r.rrf(rrf -> rrf.rankConstant(60L).rankWindowSize(100L)))
                         .size(topK),
                 MemoryRecord.class
@@ -485,7 +577,10 @@ public class HybridMemoryStore implements MemoryStore {
         ));
     }
 
-    private void indexMemory(MemoryRecord memory, List<Float> vector) throws IOException {
+    /**
+     * 写入 ES 文档。返回 ES 侧的写入结果（CREATED / UPDATED），供审计日志区分新建与覆盖。
+     */
+    private String indexMemory(MemoryRecord memory, List<Float> vector) throws IOException {
         Map<String, Object> doc = new HashMap<>();
         doc.put("memoryId", memory.getMemoryId());
         doc.put("type", memory.getType().name());
@@ -497,11 +592,12 @@ public class HybridMemoryStore implements MemoryStore {
         doc.put("meta", memory.getMeta() == null ? Map.of() : memory.getMeta());
         doc.put("content_vector", vector);
 
-        esClient.index(i -> i
+        var response = esClient.index(i -> i
                 .index(INDEX_NAME)
                 .id(memory.getMemoryId())
                 .document(doc)
         );
+        return response.result().jsonValue();
     }
 
     private void ensureIndex() {
@@ -534,9 +630,14 @@ public class HybridMemoryStore implements MemoryStore {
                                     .properties("meta", p -> p.object(o -> o.enabled(true)))
                             )
                     );
+                    log.info("AUDIT_MEMORY_INDEX_CREATED index={} dims={} similarity=cosine", INDEX_NAME, dimensions);
+                } else {
+                    // 不在此处再探测维度：dimensions() 可能触发一次真实 embedding 调用。
+                    log.info("AUDIT_MEMORY_INDEX_READY index={}", INDEX_NAME);
                 }
                 indexInitialized = true;
             } catch (IOException e) {
+                log.warn("AUDIT_MEMORY_INDEX_INIT_FAILED index={} error={}", INDEX_NAME, e.getMessage(), e);
                 throw new RuntimeException("Failed to initialize memory index", e);
             }
         }
@@ -545,22 +646,44 @@ public class HybridMemoryStore implements MemoryStore {
     private int embeddingDimensions() {
         try {
             int dimensions = embeddingModel.dimensions();
-            return dimensions > 0 ? dimensions : DEFAULT_EMBEDDING_DIMENSIONS;
+            if (dimensions > 0) {
+                log.info("AUDIT_MEMORY_EMBEDDING_READY model={} dims={}",
+                        embeddingModel.getClass().getSimpleName(), dimensions);
+                return dimensions;
+            }
+            // 维度探测失败会回退到 1536，若真实模型是 1024 维则后续 kNN 必然失败，这里显式留一行审计。
+            log.warn("AUDIT_MEMORY_EMBEDDING_DIMS_UNKNOWN probed={} fallback={}", dimensions, DEFAULT_EMBEDDING_DIMENSIONS);
+            return DEFAULT_EMBEDDING_DIMENSIONS;
         } catch (Exception e) {
+            log.warn("AUDIT_MEMORY_EMBEDDING_DIMS_PROBE_FAILED fallback={} error={}",
+                    DEFAULT_EMBEDDING_DIMENSIONS, e.getMessage(), e);
             return DEFAULT_EMBEDDING_DIMENSIONS;
         }
     }
 
     private List<Float> embed(String text) {
-        float[] values = embeddingModel.embed(text);
-        if (values == null || values.length == 0) {
-            return List.of();
+        long start = System.nanoTime();
+        try {
+            float[] values = embeddingModel.embed(text);
+            if (values == null || values.length == 0) {
+                log.warn("AUDIT_MEMORY_EMBED_EMPTY query=\"{}\" durationMs={}", brief(text),
+                        (System.nanoTime() - start) / 1_000_000);
+                return List.of();
+            }
+            if (log.isDebugEnabled()) {
+                log.debug("AUDIT_MEMORY_EMBED query=\"{}\" dims={} durationMs={}", brief(text), values.length,
+                        (System.nanoTime() - start) / 1_000_000);
+            }
+            List<Float> vector = new ArrayList<>(values.length);
+            for (float value : values) {
+                vector.add(value);
+            }
+            return vector;
+        } catch (Exception e) {
+            log.warn("AUDIT_MEMORY_EMBED_FAILED query=\"{}\" durationMs={} error={}", brief(text),
+                    (System.nanoTime() - start) / 1_000_000, e.getMessage(), e);
+            throw e;
         }
-        List<Float> vector = new ArrayList<>(values.length);
-        for (float value : values) {
-            vector.add(value);
-        }
-        return vector;
     }
 
     private MemoryRecord buildRecord(String content, String runId, MemoryRecord.MemoryType type) {
@@ -616,6 +739,7 @@ public class HybridMemoryStore implements MemoryStore {
     }
 
     private RawMemories extractMemory(List<Message> messages, String runId) {
+        long start = System.nanoTime();
         try {
             RunnableConfig runnableConfig = RunnableConfig.builder()
                     .threadId((runId == null ? "" : runId) + "_MEMORY")
@@ -623,12 +747,25 @@ public class HybridMemoryStore implements MemoryStore {
 
             UserMessage userMessage = new UserMessage(buildMemoryPrompt(messages, runId));
             AssistantMessage call = memoryAgent.call(userMessage, runnableConfig);
-            return parseRawMemories(call.getText());
+            RawMemories rawMemories = parseRawMemories(call.getText());
+            log.info("AUDIT_MEMORY_EXTRACT_AGENT runId={} memories={} durationMs={}",
+                    runId, rawMemories.getMemories().size(), (System.nanoTime() - start) / 1_000_000);
+            if (log.isDebugEnabled()) {
+                // 抽取 Agent 的原始输出：定位“为什么没记住 / 为什么记错”时最关键的一行。
+                log.debug("AUDIT_MEMORY_EXTRACT_RAW runId={} payload={}", runId, brief(call.getText()));
+            }
+            return rawMemories;
         } catch (GraphRunnerException e) {
+            log.warn("AUDIT_MEMORY_EXTRACT_FAILED runId={} stage=agent durationMs={} error={}",
+                    runId, (System.nanoTime() - start) / 1_000_000, e.getMessage(), e);
             throw new RuntimeException(e);
         } catch (JsonProcessingException e) {
+            log.warn("AUDIT_MEMORY_EXTRACT_FAILED runId={} stage=prompt durationMs={} error={}",
+                    runId, (System.nanoTime() - start) / 1_000_000, e.getMessage(), e);
             throw new RuntimeException("Failed to build memory extraction prompt", e);
         } catch (IOException e) {
+            log.warn("AUDIT_MEMORY_EXTRACT_FAILED runId={} stage=existingMemories durationMs={} error={}",
+                    runId, (System.nanoTime() - start) / 1_000_000, e.getMessage(), e);
             throw new RuntimeException("Failed to collect existing memories", e);
         }
     }
@@ -677,9 +814,12 @@ public class HybridMemoryStore implements MemoryStore {
             }
         }
 
-        return unique.values().stream()
+        List<Map<String, Object>> payload = unique.values().stream()
                 .map(this::memoryToPromptPayload)
                 .toList();
+        // 喂给抽取 Agent 的“旧记忆上下文”直接决定它输出 ADD 还是 UPDATE，排障时必须能看到。
+        log.debug("AUDIT_MEMORY_EXTRACT_CONTEXT existing={}", payload.size());
+        return payload;
     }
 
     private Map<String, Object> memoryToPromptPayload(MemoryRecord memory) {
@@ -702,10 +842,18 @@ public class HybridMemoryStore implements MemoryStore {
     private RawMemories parseRawMemories(String text) throws JsonProcessingException {
         String json = extractJsonObject(text);
         if (json.isEmpty()) {
+            log.info("AUDIT_MEMORY_EXTRACT_EMPTY reason=noJsonContent payload={}", brief(text));
             return new RawMemories(List.of());
         }
 
-        RawMemories memories = objectMapper.readValue(json, RawMemories.class);
+        RawMemories memories;
+        try {
+            memories = objectMapper.readValue(json, RawMemories.class);
+        } catch (JsonProcessingException e) {
+            log.warn("AUDIT_MEMORY_EXTRACT_PARSE_FAILED error={} payload={}",
+                    e.getOriginalMessage(), brief(json));
+            throw e;
+        }
         if (memories.getMemories() == null) {
             memories.setMemories(List.of());
         }
@@ -852,7 +1000,82 @@ public class HybridMemoryStore implements MemoryStore {
     }
 
     private void promoteType(MemoryRecord target, MemoryRecord.MemoryType newType) {
+        MemoryRecord.MemoryType oldType = target.getType();
         target.setType(newType);
         target.setTtl(defaultTtl(newType));
+        log.info("AUDIT_MEMORY_PROMOTE memoryId={} from={} to={} ttl={} distinctHits={}",
+                target.getMemoryId(), oldType, newType, target.getTtl(),
+                target.getMeta() == null ? null : target.getMeta().get("distinctHitCount"));
+    }
+
+    // ==================== 审计日志辅助 ====================
+
+    /** 压掉换行并按默认长度截断，保证一条审计记录只占一行、便于 grep。 */
+    private String brief(String text) {
+        return brief(text, AUDIT_CONTENT_MAX_LENGTH);
+    }
+
+    private String brief(String text, int maxLength) {
+        if (text == null) {
+            return "";
+        }
+        String oneLine = text.replaceAll("\\s+", " ").trim();
+        if (oneLine.length() <= maxLength) {
+            return oneLine;
+        }
+        return oneLine.substring(0, maxLength) + "...(len=" + oneLine.length() + ")";
+    }
+
+    /** 浮点统一保留 3 位小数，避免审计日志里出现 0.6999999999 这类难以比对的值。 */
+    private double num(double value) {
+        return Math.round(value * 1000d) / 1000d;
+    }
+
+    /** 取 memoryId 前 8 位：完整 UUID 出现在每一行会淹没有效信息。 */
+    private String shortId(String memoryId) {
+        if (memoryId == null || memoryId.isBlank()) {
+            return "-";
+        }
+        return memoryId.substring(0, Math.min(8, memoryId.length()));
+    }
+
+    private String metaValue(MemoryRecord memory, String key) {
+        if (memory == null || memory.getMeta() == null) {
+            return null;
+        }
+        Object value = memory.getMeta().get(key);
+        return value == null ? null : String.valueOf(value);
+    }
+
+    /** 召回结果采样，形如 [USER:a1b2c3d4:用户偏好X, SESSION:e5f6a7b8:本次任务Y]。 */
+    private String summarize(List<MemoryRecord> records) {
+        if (records == null || records.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        int limit = Math.min(records.size(), AUDIT_HIT_SAMPLE);
+        for (int i = 0; i < limit; i++) {
+            MemoryRecord record = records.get(i);
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(record.getType()).append(':').append(shortId(record.getMemoryId()))
+                    .append(':').append(brief(record.getContent(), AUDIT_HIT_CONTENT_MAX_LENGTH));
+        }
+        if (records.size() > limit) {
+            sb.append(", ...").append(records.size() - limit).append("more");
+        }
+        return sb.append(']').toString();
+    }
+
+    private Map<String, Long> countByType(List<MemoryRecord> records) {
+        if (records == null || records.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Long> counts = new LinkedHashMap<>();
+        for (MemoryRecord record : records) {
+            counts.merge(String.valueOf(record.getType()), 1L, Long::sum);
+        }
+        return counts;
     }
 }

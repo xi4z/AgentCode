@@ -38,6 +38,15 @@ spring:
       # 长期记忆 HybridMemoryStore 需要 EmbeddingModel。
       # 如果同时引入 OpenAI / DashScope starter，必须显式选择 embedding 模型 provider。
       embedding: ${AI_EMBEDDING_MODEL_PROVIDER:openai}
+      # 下面这些子模型项目里没有用到，但 spring-ai-starter-model-openai 的对应自动装配
+      # 只受 spring.ai.model.<type> 控制：不显式设成 none 时，即使 chat/embedding 走 dashscope，
+      # OpenAiAudioSpeechAutoConfiguration 等仍会实例化并要求 spring.ai.openai.api-key，
+      # 表现为 "OpenAI API key must be set" 导致启动失败。
+      image: ${AI_IMAGE_MODEL:none}
+      moderation: ${AI_MODERATION_MODEL:none}
+      audio:
+        speech: ${AI_AUDIO_SPEECH_MODEL:none}
+        transcription: ${AI_AUDIO_TRANSCRIPTION_MODEL:none}
 
     openai:
       api-key: ${OPENAI_API_KEY:}
@@ -54,7 +63,11 @@ spring:
 
     dashscope:
       api-key: ${DASHSCOPE_API_KEY:}
-      base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/api/v1}
+      # DashScopeApi 按 baseUrl + embeddingsPath 拼接请求地址，
+      # 而 embeddingsPath 常量本身已带 "/api/v1"（/api/v1/services/embeddings/text-embedding/text-embedding），
+      # 所以这里必须填【不含 /api/v1】的主机地址，否则会拼成 /api/v1/api/v1/... 直接 404。
+      # 专属 MaaS 实例写法示例：https://ws-xxxx.cn-beijing.maas.aliyuncs.com
+      base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com}
       chat:
         options:
           model: ${DASHSCOPE_CHAT_MODEL:qwen-max}
