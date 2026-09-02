@@ -29,9 +29,10 @@ else
     docker update --restart "$RESTART" "$NAME" >/dev/null 2>&1 || true
   else
     echo "[es-up] 创建容器 $NAME ($IMAGE)"
+    # 只绑 127.0.0.1：ES 关闭了 xpack security，暴露公网等于裸奔（实测被公网扫描即是教训）
     docker run -d --name "$NAME" \
       --restart "$RESTART" \
-      -p "$PORT:9200" \
+      -p "127.0.0.1:$PORT:9200" \
       -e "discovery.type=single-node" \
       -e "xpack.security.enabled=false" \
       -e "xpack.security.enrollment.enabled=false" \

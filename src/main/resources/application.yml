@@ -13,6 +13,12 @@ spring:
     hikari:
       minimum-idle: ${DB_POOL_MIN_IDLE:1}
       maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+      # 获取连接超时（毫秒）：避免池耗尽时无限等待拖垮请求线程
+      connection-timeout: ${DB_CONNECTION_TIMEOUT:5000}
+      # 连接最大存活（毫秒，25m）：小于 MySQL wait_timeout，避免使用已被服务端关闭的连接
+      max-lifetime: ${DB_MAX_LIFETIME:1500000}
+      # 连接有效性校验超时（毫秒）
+      validation-timeout: ${DB_VALIDATION_TIMEOUT:3000}
 
   sql:
     init:
@@ -24,12 +30,6 @@ spring:
     uris: ${ES_URIS:http://localhost:9200}
     connection-timeout: ${ES_CONNECTION_TIMEOUT:5s}
     socket-timeout: ${ES_SOCKET_TIMEOUT:30s}
-
-  autoconfigure:
-    # HybridMemoryStore 直接使用 ElasticsearchClient 做自定义 agent_memory 索引；
-    # 暂时排除 Spring AI ES VectorStore 自动装配，避免和长期记忆索引冲突。
-    exclude:
-      - org.springframework.ai.vectorstore.elasticsearch.autoconfigure.ElasticsearchVectorStoreAutoConfiguration
 
   ai:
     model:
@@ -87,6 +87,9 @@ spring:
         enabled: ${MCP_CLIENT_ENABLED:false}
 
 agentcode:
+  # REST / WebSocket 握手的访问令牌；为空（默认）不启用鉴权，仅限本地开发模式。
+  # 配置后要求 Authorization: Bearer <token> 或 ?token=<token>
+  api-token: ${AGENTCODE_API_TOKEN:}
   checkpoint:
     redis:
       address: ${REDIS_CHECKPOINT_ADDRESS:redis://127.0.0.1:6379}

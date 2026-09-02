@@ -102,16 +102,11 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!-- Elasticsearch Java Client：支持倒排检索（BM25）与 dense_vector/kNN 向量检索 -->
+        <!-- Elasticsearch Java Client：支持倒排检索（BM25）与 dense_vector/kNN 向量检索
+             （HybridMemoryStore 直接使用原生 ElasticsearchClient，无需 Spring AI VectorStore starter） -->
         <dependency>
             <groupId>co.elastic.clients</groupId>
             <artifactId>elasticsearch-java</artifactId>
-        </dependency>
-
-        <!-- Spring AI Elasticsearch Vector Store：统一使用 ES 做向量 + 倒排检索 -->
-        <dependency>
-            <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-starter-vector-store-elasticsearch</artifactId>
         </dependency>
 
         <dependency>

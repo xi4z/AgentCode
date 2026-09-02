@@ -14,6 +14,10 @@ import java.util.List;
  * agentcode:
  *   audit:
  *     enabled: true
+ *   api-token:            # 为空（默认）不启用 API 鉴权，仅限本地开发模式
+ *   checkpoint:
+ *     redis:
+ *       address: redis://127.0.0.1:6379
  *   agent:
  *     max-steps: 20
  *     system-prompt: ...
@@ -37,10 +41,38 @@ public class AgentCodeProperties {
 
     private Agent agent = new Agent();
 
+    /**
+     * REST / WebSocket 握手的访问令牌。
+     * 为空（默认，env: AGENTCODE_API_TOKEN 不设置）时不启用鉴权，
+     * 仅为向后兼容本地开发模式；生产环境必须配置。
+     */
+    private String apiToken = "";
+
+    private Checkpoint checkpoint = new Checkpoint();
+
     @Data
     public static class Audit {
         /** 是否包装 ChatModel 输出 AI 调用审计日志 */
         private boolean enabled = true;
+    }
+
+    /** checkpoint 存储配置 */
+    @Data
+    public static class Checkpoint {
+
+        private Redis redis = new Redis();
+
+        @Data
+        public static class Redis {
+            /** Redis 连接地址 */
+            private String address = "redis://127.0.0.1:6379";
+
+            /** 为空表示无密码 */
+            private String password = "";
+
+            /** Redis 逻辑库 */
+            private int database = 0;
+        }
     }
 
     @Data
