@@ -29,6 +29,7 @@ import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import reactor.core.publisher.SignalType;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -84,11 +85,8 @@ public class AgentSession {
     }
 
     public Flux<AgentStream> run(String goal){
-        // 新的非空输入表示开启新的一轮对话，不应继续携带上一次审批恢复的 feedback 元数据
-        if (goal != null && !goal.isBlank()) {
-            config.context().remove(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY);
-            config.metadata().ifPresent(metadata -> metadata.remove(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY));
-        }
+        // M3 修复：HUMAN_FEEDBACK 元数据的清理已移入 run(goal, runConfig, expectedStatus)，
+        // 在锁内、状态校验（确认可启动新 run）之后执行，避免破坏进行中会话的审批恢复
         return run(goal, config, Status.FREE);
     }
 
@@ -97,7 +95,15 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
     }
 
     private Flux<AgentStream> run(String goal, RunnableConfig runConfig, Status expectedStatus){
+        long runStartNanos = System.nanoTime();
+        AtomicInteger eventCount = new AtomicInteger();
+        AtomicInteger toolEventCount = new AtomicInteger();
+        AtomicInteger permissionCount = new AtomicInteger();
+        runConfig.context().put(SessionConfigKeys.AGENT_CONTEXT, agentContext); // 将 agentContext 丢入 Config 的 Context 中, 方便后续 Hook, Interceptor 和 Tool 的处理
         Sinks.Many<AgentStream> sink;
+        Disposable disposable = null;
+        GraphRunnerException setupError = null;
+        RunningTask task;
         synchronized (this) {
             if (status != expectedStatus) {
                 if (status == Status.RUNNING) {
@@ -105,85 +111,108 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
                 }
                 throw new InvalidStatusException("会话:" + agentContext.getRunId() + "当前状态为 " + status + "，不能开启新的对话，请先完成/取消审批");
             }
+            // M3 修复：新的非空输入表示开启新的一轮对话，不应继续携带上一次审批恢复的 feedback 元数据。
+            // 清理必须在锁内、状态校验（确认可启动新 run）之后进行，避免破坏进行中会话的审批恢复
+            if (goal != null && !goal.isBlank()) {
+                runConfig.context().remove(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY);
+                runConfig.metadata().ifPresent(metadata -> metadata.remove(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY));
+            }
+            log.info(
+                    "AUDIT_AGENT_RUN_START runId={} goal={} workspace={}",
+                    agentContext.getRunId(),
+                    goal,
+                    agentContext.getWorkspace()
+            );
             status = Status.RUNNING;
             sink = Sinks.many()
                     .unicast()
                     .onBackpressureBuffer();
-        }
-        long runStartNanos = System.nanoTime();
-        AtomicInteger eventCount = new AtomicInteger();
-        AtomicInteger toolEventCount = new AtomicInteger();
-        AtomicInteger permissionCount = new AtomicInteger();
-        log.info(
-                "AUDIT_AGENT_RUN_START runId={} goal={} workspace={}",
-                agentContext.getRunId(),
-                goal,
-                agentContext.getWorkspace()
-        );
-        runConfig.context().put(SessionConfigKeys.AGENT_CONTEXT, agentContext); // 将 agentContext 丢入 Config 的 Context 中, 方便后续 Hook, Interceptor 和 Tool 的处理
-        Disposable disposable;
-        try {
-            // 2. 启动内部 Agent，把事件转发到 sink
-            disposable = reactAgent.stream(goal, runConfig).concatMap(this::classifyMessage)
-                    .doOnNext(stream -> {
-                        eventCount.incrementAndGet();
-                        if (stream.status() == AgentStream.Status.TOOL_STREAMING
-                                || stream.status() == AgentStream.Status.TOOL_FINISHED) {
-                            toolEventCount.incrementAndGet();
-                        } else if (stream.status() == AgentStream.Status.PERMISSION_REQUESTED) {
-                            permissionCount.incrementAndGet();
-                        }
-                    })
-                    .doOnNext(sink::tryEmitNext)
-                    .doOnComplete(() -> {
-                        synchronized (this) {
-                            runningTask = null;
-                            // 审批中断时保留 INTERRUPTED 状态，等待 handleAgentInterrupt 恢复
-                            if (status != Status.INTERRUPTED) {
-                                status = Status.FREE;
+            try {
+                // 2. 启动内部 Agent，把事件转发到 sink。
+                //    订阅也在同一锁内完成，保证 status=RUNNING 与 runningTask 赋值之间不留窗口
+                disposable = reactAgent.stream(goal, runConfig).concatMap(this::classifyMessage)
+                        .doOnNext(stream -> {
+                            eventCount.incrementAndGet();
+                            if (stream.status() == AgentStream.Status.TOOL_STREAMING
+                                    || stream.status() == AgentStream.Status.TOOL_FINISHED) {
+                                toolEventCount.incrementAndGet();
+                            } else if (stream.status() == AgentStream.Status.PERMISSION_REQUESTED) {
+                                permissionCount.incrementAndGet();
                             }
-                        }
-                        logAgentRun(runStartNanos, agentContext.getRunId(), goal, "COMPLETED",
-                                eventCount.get(), toolEventCount.get(), permissionCount.get(), null);
-                        sink.tryEmitComplete();
-                    })
-                    .doOnError(error -> {
-                        synchronized (this) {
-                            runningTask = null;
-                            if (status != Status.INTERRUPTED) {
-                                status = Status.FREE;
+                        })
+                        .doOnNext(sink::tryEmitNext)
+                        .doOnComplete(() -> {
+                            synchronized (this) {
+                                runningTask = null;
+                                // 审批中断时保留 INTERRUPTED 状态，等待 handleAgentInterrupt 恢复
+                                if (status != Status.INTERRUPTED) {
+                                    status = Status.FREE;
+                                }
                             }
-                        }
-                        logAgentRun(runStartNanos, agentContext.getRunId(), goal, "ERROR",
-                                eventCount.get(), toolEventCount.get(), permissionCount.get(),
-                                error.getMessage());
-                        sink.tryEmitError(error);
-                    })
-                    .subscribe();
-        } catch (GraphRunnerException e) {
-            logAgentRun(runStartNanos, agentContext.getRunId(), goal, "ERROR",
-                    eventCount.get(), toolEventCount.get(), permissionCount.get(), e.getMessage());
-            sink.tryEmitError(e);
-            synchronized (this) {
+                            logAgentRun(runStartNanos, agentContext.getRunId(), goal, "COMPLETED",
+                                    eventCount.get(), toolEventCount.get(), permissionCount.get(), null);
+                            sink.tryEmitComplete();
+                        })
+                        .doOnError(error -> {
+                            synchronized (this) {
+                                runningTask = null;
+                                if (status != Status.INTERRUPTED) {
+                                    status = Status.FREE;
+                                }
+                            }
+                            logAgentRun(runStartNanos, agentContext.getRunId(), goal, "ERROR",
+                                    eventCount.get(), toolEventCount.get(), permissionCount.get(),
+                                    error.getMessage());
+                            sink.tryEmitError(error);
+                        })
+                        .subscribe();
+            } catch (GraphRunnerException e) {
+                setupError = e;
+            }
+            if (setupError != null) {
+                // 启动失败：回滚状态，让会话可以重新 run
                 runningTask = null;
                 status = Status.FREE;
+                task = null;
+            } else if (status == Status.RUNNING) {
+                // 若流已同步结束，doOnComplete/doOnError 已把 runningTask 置空、status 置回 FREE/INTERRUPTED，
+                // 不能再放回已完成任务
+                task = new RunningTask(disposable, sink);
+                runningTask = task;
+            } else {
+                task = null;
             }
+        }
+        if (setupError != null) {
+            logAgentRun(runStartNanos, agentContext.getRunId(), goal, "ERROR",
+                    eventCount.get(), toolEventCount.get(), permissionCount.get(), setupError.getMessage());
+            sink.tryEmitError(setupError);
             return sink.asFlux();
         }
 
-        // 3. 保存 disposable + sink，供 stop() 使用
-        RunningTask task = new RunningTask(disposable, sink);
-        synchronized (this) {
-            // 如果流已经同步结束，doOnComplete/doOnError 已把 runningTask 置空，不能再放回已完成任务
-            if (status == Status.RUNNING) {
-                runningTask = task;
-            }
-        }
+        // 3. 返回外部流（WebSocket sink），doFinally 负责外部 cancel 时同步清理内部订阅
         return sink.asFlux()
                 .doFinally(signal -> {
+                    if (task == null) {
+                        return;
+                    }
                     synchronized (this) {
                         // 只清理当前这次 run 的任务，避免旧流结束时误清新会话的任务
                         if (runningTask == task) {
+                            // B3 修复：外部订阅（WebSocket sink）被 cancel 时，内部 reactAgent.stream
+                            // 订阅不会随之取消（sink 只是转发通道），必须先 dispose 内部订阅再清引用，
+                            // 否则 LLM 调用与 shell 工具会在后台继续跑完（幽灵执行）。
+                            // Disposable.dispose 是幂等的，与 stop() 的 dispose 重复调用也安全。
+                            if (signal == SignalType.CANCEL) {
+                                task.getDisposable().dispose();
+                                // dispose 后内部流的 doOnComplete/doOnError 不会再触发，
+                                // 需要在这里同步回置状态，否则会话会永久卡在 RUNNING
+                                if (status == Status.RUNNING) {
+                                    status = Status.FREE;
+                                }
+                                log.info("AUDIT_AGENT_RUN_CANCELLED runId={} goal={}",
+                                        agentContext.getRunId(), goal);
+                            }
                             runningTask = null;
                         }
                     }
@@ -215,6 +244,9 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
 
         // 锁外执行真正的中断/完成通知，避免持锁做耗时或阻塞操作
         task.getDisposable().dispose();
+        // 先发 STOPPED 事件再完成 sink：让订阅方（WebSocket handler）知道这是主动停止，
+        // 从而抑制多余的 done 终态——否则客户端会在 stopped 之前收到假 done
+        task.getSink().tryEmitNext(new AgentStream(AgentStream.Status.STOPPED, agentContext.getRunId()));
         task.getSink().tryEmitComplete();
     }
 
@@ -271,6 +303,8 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
             return false;
         }
         List<String> abandoned;
+        // M2 修复：与本会话的恢复路径（handleAgentInterrupt/resumeInterruptedRun）共用同一把锁（this），
+        // 避免"放弃审批"与"提交审批恢复"并发交错
         synchronized (this) {
             if (status != Status.INTERRUPTED) {
                 return false;
@@ -302,42 +336,45 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
      * 答复齐了才真正重建 metadata 并续跑。
      */
     public Flux<AgentStream> handleAgentInterrupt(AgentInterruptHandle[] handles) {
+        // M2 修复：状态检查、读取 pending/handled 上下文、合并决定与恢复执行必须整体在会话锁内完成，
+        // 否则与 abandonStaleApproval（审批超时放弃）并发交错时，
+        // 可能读到已被清理的审批上下文而抛 IllegalStateException
         synchronized (this) {
             if (status != Status.INTERRUPTED) {
                 throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "恢复中断失败, 因为当前会话没有在被中断");
             }
-        }
-        Object raw = config.context().get(SessionConfigKeys.HANDLED_INTERRUPTION);
-        if (!(raw instanceof InterruptionMetadata.Builder)) {
-            throw new IllegalStateException("会话: " + this.agentContext.getRunId() + "没有待处理的审批上下文");
-        }
-        Map<String, InterruptionMetadata.ToolFeedback> pendingInterrupted = pendingFeedbacks();
-        Map<String, AgentInterruptHandle> responses = recordedResponses();
-
-        AgentInterruptHandle[] submitted = handles == null ? new AgentInterruptHandle[0] : handles;
-        for (AgentInterruptHandle handle : submitted) {
-            if (handle == null || handle.getId() == null || handle.getId().isBlank()) {
-                throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "审批决定缺少 toolCallId");
+            Object raw = config.context().get(SessionConfigKeys.HANDLED_INTERRUPTION);
+            if (!(raw instanceof InterruptionMetadata.Builder)) {
+                throw new IllegalStateException("会话: " + this.agentContext.getRunId() + "没有待处理的审批上下文");
             }
-            if (!pendingInterrupted.containsKey(handle.getId())) {
-                throw new InterruptFailException("审批项 " + handle.getId() + " 不在会话 "
-                        + this.agentContext.getRunId() + " 的待审批列表中");
-            }
-            responses.put(handle.getId(), handle);
-        }
+            Map<String, InterruptionMetadata.ToolFeedback> pendingInterrupted = pendingFeedbacks();
+            Map<String, AgentInterruptHandle> responses = recordedResponses();
 
-        List<String> remaining = pendingInterrupted.keySet().stream()
-                .filter(id -> !responses.containsKey(id))
-                .toList();
-        if (!remaining.isEmpty()) {
-            log.info("会话 {} 仍有 {} 个审批项未答复: {}",
-                    agentContext.getRunId(), remaining.size(), remaining);
-            return Flux.just(new AgentStream(
-                    AgentStream.Status.PERMISSION_PENDING,
-                    approvalManager.toPendingIdsJson(remaining)
-            ));
+            AgentInterruptHandle[] submitted = handles == null ? new AgentInterruptHandle[0] : handles;
+            for (AgentInterruptHandle handle : submitted) {
+                if (handle == null || handle.getId() == null || handle.getId().isBlank()) {
+                    throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "审批决定缺少 toolCallId");
+                }
+                if (!pendingInterrupted.containsKey(handle.getId())) {
+                    throw new InterruptFailException("审批项 " + handle.getId() + " 不在会话 "
+                            + this.agentContext.getRunId() + " 的待审批列表中");
+                }
+                responses.put(handle.getId(), handle);
+            }
+
+            List<String> remaining = pendingInterrupted.keySet().stream()
+                    .filter(id -> !responses.containsKey(id))
+                    .toList();
+            if (!remaining.isEmpty()) {
+                log.info("会话 {} 仍有 {} 个审批项未答复: {}",
+                        agentContext.getRunId(), remaining.size(), remaining);
+                return Flux.just(new AgentStream(
+                        AgentStream.Status.PERMISSION_PENDING,
+                        approvalManager.toPendingIdsJson(remaining)
+                ));
+            }
+            return resumeInterruptedRun();
         }
-        return resumeInterruptedRun();
     }
 
     /**
@@ -365,65 +402,71 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
 
     /**
      * 用收集到的决定重建 InterruptionMetadata 并续跑会话。
+     *
+     * <p>M2 修复：本方法的"读取 pending/handled 上下文 → 合并决定 → 状态迁移（清理上下文、
+     * 换 config、续跑）"整体在会话锁内执行，与 abandonStaleApproval 共用同一把锁（this），
+     * 保证同一会话同时只有一个恢复路径在执行（从 handleAgentInterrupt 进入时为可重入加锁）。
      */
     private Flux<AgentStream> resumeInterruptedRun() {
-        InterruptionMetadata.Builder handledInterruption = (InterruptionMetadata.Builder)
-                config.context().get(SessionConfigKeys.HANDLED_INTERRUPTION);
-        Map<String, InterruptionMetadata.ToolFeedback> pendingInterrupted = pendingFeedbacks();
-        Map<String, AgentInterruptHandle> responses = recordedResponses();
+        synchronized (this) {
+            InterruptionMetadata.Builder handledInterruption = (InterruptionMetadata.Builder)
+                    config.context().get(SessionConfigKeys.HANDLED_INTERRUPTION);
+            Map<String, InterruptionMetadata.ToolFeedback> pendingInterrupted = pendingFeedbacks();
+            Map<String, AgentInterruptHandle> responses = recordedResponses();
 
-        for (Map.Entry<String, InterruptionMetadata.ToolFeedback> entry : pendingInterrupted.entrySet()) {
-            InterruptionMetadata.ToolFeedback original = entry.getValue();
-            AgentInterruptHandle handle = responses.get(entry.getKey());
-            if (handle == null) {
-                // 理论上不会发生（答复齐才恢复），兜底按拒绝处理，绝不默认放行
-                handle = new AgentInterruptHandle(agentContext.getRunId(), entry.getKey(), original.getName(),
-                        original.getArguments(), original.getDescription(), AgentInterruptHandle.Decision.REJECTED, null);
-            }
-            String originalArguments = original.getArguments();
-            AgentInterruptHandle.Decision decision = handle.getDecision() == null
-                    ? AgentInterruptHandle.Decision.REJECTED
-                    : handle.getDecision();
-
-            InterruptionMetadata.ToolFeedback.Builder fbBuilder = InterruptionMetadata.ToolFeedback.builder()
-                    .name(handle.getName() != null ? handle.getName() : original.getName())
-                    .id(entry.getKey())
-                    .description(handle.getDescription() != null ? handle.getDescription() : original.getDescription())
-                    .arguments(approvalManager.resolveArguments(handle, originalArguments));
-
-            switch (decision) {
-                case APPROVED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
-                case APPROVE_ALL -> {
-                    fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
-                    approvalManager.rememberApproval(handle, originalArguments);
+            for (Map.Entry<String, InterruptionMetadata.ToolFeedback> entry : pendingInterrupted.entrySet()) {
+                InterruptionMetadata.ToolFeedback original = entry.getValue();
+                AgentInterruptHandle handle = responses.get(entry.getKey());
+                if (handle == null) {
+                    // 理论上不会发生（答复齐才恢复），兜底按拒绝处理，绝不默认放行
+                    handle = new AgentInterruptHandle(agentContext.getRunId(), entry.getKey(), original.getName(),
+                            original.getArguments(), original.getDescription(), AgentInterruptHandle.Decision.REJECTED, null);
                 }
-                case EDITED -> {
-                    // 临时关闭 EDITED：避免编辑后的参数再次触发审批时形成无限恢复循环。
-                    // 后续可重新开启，但需要增加恢复次数上限和参数合法性校验。
-                    log.warn("AUDIT_EDITED_DISABLED runId={} toolCallId={} treatAs=REJECTED",
-                            agentContext.getRunId(), entry.getKey());
-                    fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
+                String originalArguments = original.getArguments();
+                AgentInterruptHandle.Decision decision = handle.getDecision() == null
+                        ? AgentInterruptHandle.Decision.REJECTED
+                        : handle.getDecision();
+
+                InterruptionMetadata.ToolFeedback.Builder fbBuilder = InterruptionMetadata.ToolFeedback.builder()
+                        .name(handle.getName() != null ? handle.getName() : original.getName())
+                        .id(entry.getKey())
+                        .description(handle.getDescription() != null ? handle.getDescription() : original.getDescription())
+                        .arguments(approvalManager.resolveArguments(handle, originalArguments));
+
+                switch (decision) {
+                    case APPROVED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
+                    case APPROVE_ALL -> {
+                        fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
+                        approvalManager.rememberApproval(handle, originalArguments);
+                    }
+                    case EDITED -> {
+                        // 临时关闭 EDITED：避免编辑后的参数再次触发审批时形成无限恢复循环。
+                        // 后续可重新开启，但需要增加恢复次数上限和参数合法性校验。
+                        log.warn("AUDIT_EDITED_DISABLED runId={} toolCallId={} treatAs=REJECTED",
+                                agentContext.getRunId(), entry.getKey());
+                        fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
+                    }
+                    default -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
                 }
-                default -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
+
+                handledInterruption.addToolFeedback(fbBuilder.build());
             }
 
-            handledInterruption.addToolFeedback(fbBuilder.build());
+            InterruptionMetadata data = handledInterruption.build();
+            RunnableConfig newConfig = RunnableConfig.builder()
+                    .threadId(agentContext.getRunId())
+                    .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data)
+                    .build();
+            config.context().remove(SessionConfigKeys.HANDLED_INTERRUPTION);
+            config.context().remove(SessionConfigKeys.PENDING_INTERRUPTIONS);
+            config.context().remove(SessionConfigKeys.PENDING_RESPONSES);
+            approvalWaitSinceEpochMs = 0;
+            config = newConfig;
+            config.context().put(SessionConfigKeys.AGENT_CONTEXT, agentContext);
+            // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
+            shellTool2.getSessionManager().initialize(newConfig);
+            return run("", newConfig, Status.INTERRUPTED);
         }
-
-        InterruptionMetadata data = handledInterruption.build();
-        RunnableConfig newConfig = RunnableConfig.builder()
-                .threadId(agentContext.getRunId())
-                .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data)
-                .build();
-        config.context().remove(SessionConfigKeys.HANDLED_INTERRUPTION);
-        config.context().remove(SessionConfigKeys.PENDING_INTERRUPTIONS);
-        config.context().remove(SessionConfigKeys.PENDING_RESPONSES);
-        approvalWaitSinceEpochMs = 0;
-        config = newConfig;
-        config.context().put(SessionConfigKeys.AGENT_CONTEXT, agentContext);
-        // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
-        shellTool2.getSessionManager().initialize(newConfig);
-        return run("", newConfig, Status.INTERRUPTED);
     }
 
     private void logAgentRun(long runStartNanos, String runId, String goal, String result,

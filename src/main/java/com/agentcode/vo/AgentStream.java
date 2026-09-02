@@ -16,6 +16,8 @@ public record AgentStream(
         RESPONSE_FINISHED,
         TOOL_STREAMING,
         TOOL_FINISHED,
+        /** 会话被 stop() 主动停止：转发给订阅方用于抑制多余的 done 终态 */
+        STOPPED,
         PERMISSION_REQUESTED,
         /** 本轮仍有未答复的审批项，服务端已记录本次决定但暂不恢复执行 */
         PERMISSION_PENDING

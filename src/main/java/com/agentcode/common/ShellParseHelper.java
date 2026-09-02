@@ -154,11 +154,27 @@ public final class ShellParseHelper {
     }
 
     /**
-     * 将命令按 shell 运算符拆成多个子命令片段
+     * 将命令按 shell 运算符拆成多个子命令片段。
+     * 换行符（\r\n / \n / \r）在 shell 里同样是命令分隔符，必须先按行拆开再逐行处理，
+     * 否则 "ls\nchmod -R 777 ." 会被误当成一条 ls 开头的安全命令。
      */
     public static List<String> splitShellSegments(String command) {
-        List<String> tokens = ShellParseHelper.splitCommand(command);
         List<String> segments = new ArrayList<>();
+        if (command == null || command.isEmpty()) {
+            return segments;
+        }
+        // 先按换行拆成多行，行内再按运算符拆分（-1 保留尾部空行，空行不会产生片段）
+        for (String line : command.split("\r?\n|\r", -1)) {
+            appendLineSegments(line, segments);
+        }
+        return segments;
+    }
+
+    /**
+     * 单行内按 shell 运算符拆分子命令片段，结果追加到 segments
+     */
+    private static void appendLineSegments(String line, List<String> segments) {
+        List<String> tokens = ShellParseHelper.splitCommand(line);
         StringBuilder current = new StringBuilder();
 
         for (String token : tokens) {
@@ -177,7 +193,62 @@ public final class ShellParseHelper {
         if (!current.isEmpty()) {
             segments.add(current.toString());
         }
-        return segments;
+    }
+
+    /**
+     * 检测命令是否包含命令替换（反引号、$( 、${ ）。
+     * 命令替换会在 shell 执行期运行任意子命令，静态白名单无法覆盖其内容，
+     * 因此命中即强制人工审批（fail-closed）。
+     *
+     * <p>引号语义与 bash 一致：单引号内是字面量，不算命令替换；
+     * 双引号内与引号外都会实际执行，一律算命中。
+     *
+     * @param input 待检测的命令文本
+     * @return true 表示存在命令替换，需人工审批
+     */
+    public static boolean containsCommandSubstitution(String input) {
+        if (input == null || input.isEmpty()) {
+            return false;
+        }
+
+        boolean singleQuote = false;
+        boolean doubleQuote = false;
+
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+
+            // 单引号：切换字面量状态（双引号内的单引号不切换）
+            if (c == '\'' && !doubleQuote) {
+                singleQuote = !singleQuote;
+                continue;
+            }
+
+            // 双引号：不影响字面量判定，但双引号内的替换依然会执行
+            if (c == '"' && !singleQuote) {
+                doubleQuote = !doubleQuote;
+                continue;
+            }
+
+            // 单引号内是纯字面量，跳过
+            if (singleQuote) {
+                continue;
+            }
+
+            // 反引号替换：`cmd`
+            if (c == '`') {
+                return true;
+            }
+
+            // $(cmd) 与 ${var} 形式的替换/展开
+            if (c == '$' && i + 1 < input.length()) {
+                char next = input.charAt(i + 1);
+                if (next == '(' || next == '{') {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**

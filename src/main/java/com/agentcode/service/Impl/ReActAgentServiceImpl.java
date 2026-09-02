@@ -44,9 +44,8 @@ public class ReActAgentServiceImpl implements ReactAgentService {
         currContext.setRunId(UUID.randomUUID().toString());
         currContext.setGoal(goal);
         currContext.setWorkspace(workspace);
-        contextMapper.insert(
-                currContext
-        );
+        // 只保留一次持久化路径：store.save 内部已是单条 INSERT ... ON DUPLICATE KEY UPDATE 原子 upsert，
+        // 不再先 contextMapper.insert 再 store.save（重复往返且可能重复插入）
         AgentContext context = new AgentContext(
             currContext
         );
@@ -61,6 +60,14 @@ public class ReActAgentServiceImpl implements ReactAgentService {
 
     @Override
     public Flux<AgentStream> run(String goal, String runId) {
+        // 先查内存中已有会话：命中直接复用，不重载持久化 context（保留会话最新状态）
+        AgentSession existing = agentSessionRegistry.getOrNull(runId);
+        if (existing != null) {
+            return existing.run(goal);
+        }
+        // 未命中才加载持久化 context 并创建：
+        // 创建（重型工厂装配 ReactAgent）在 Registry.getOrCreate 内已移到锁外执行，
+        // 并发竞争失败者丢弃自建实例、使用胜者写入的会话
         AgentContext agentContext = getAgentContext(runId);
         // 空闲会话的回收与审批超时放弃由 AgentSessionMaintenance 定时处理
         AgentSession session = agentSessionRegistry.getOrCreate(runId,

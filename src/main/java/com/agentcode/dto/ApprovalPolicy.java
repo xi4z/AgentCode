@@ -36,7 +36,10 @@ public final class ApprovalPolicy {
             "(^|\\s)\\.\\.(/|$|\\s)",      // parent traversal
             "\\$\\{?HOME\\b",              // $HOME variable
             "\\$\\{?PWD\\b",               // $PWD variable
-            "(^|\\s|;|&&|\\|\\|)cd(\\s|$)" // explicit cd
+            "(^|\\s|;|&&|\\|\\|)cd(\\s|$)", // explicit cd
+            "(^|\\s)[0-9&]*>{1,2}\\s*/[^\\s]",        // 重定向到绝对路径（含 2>、&> 等 fd 前缀）
+            "(^|\\s)[0-9&]*>{1,2}\\s*~",              // 重定向到 home 目录
+            "(^|\\s)[0-9&]*>{1,2}\\s*\\.\\.(/|\\s|$)" // 重定向越界到上级目录
     );
 
     private final Set<String> safeCommands;
@@ -95,6 +98,10 @@ public final class ApprovalPolicy {
             return false;
         }
 
+        // 1.5 命令替换检测已上移到 autoApproves()：splitShellSegments→splitCommand 会剥离引号，
+        //     在段落（无引号）上检测会把单引号字面量（bash 不执行替换）误判为替换；
+        //     原始命令字符串上才能正确识别引号语义
+
         List<String> tokens = ShellParseHelper.splitCommand(trimmed);
         if (tokens.isEmpty()) {
             return false;
@@ -124,7 +131,17 @@ public final class ApprovalPolicy {
         if (command == null || command.isBlank()) {
             return false;
         }
-        for (String segment : ShellParseHelper.splitShellSegments(command)) {
+        // 命令替换（`` ` `` / $( / ${）在执行期运行任意子命令，静态判定覆盖不了，强制人工。
+        // 必须在原始字符串上检测：splitShellSegments 会剥离引号，导致单引号字面量被误判
+        if (ShellParseHelper.containsCommandSubstitution(command)) {
+            return false;
+        }
+        List<String> segments = ShellParseHelper.splitShellSegments(command);
+        // 纯运算符命令（如 ";"）拆不出任何子命令，按人工审批兜底处理
+        if (segments.isEmpty()) {
+            return false;
+        }
+        for (String segment : segments) {
             if (!autoApprovesSegment(segment)) {
                 return false;
             }

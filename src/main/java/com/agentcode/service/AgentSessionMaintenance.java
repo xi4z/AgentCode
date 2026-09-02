@@ -29,8 +29,10 @@ public class AgentSessionMaintenance {
     private final AgentContextStore agentContextStore;
     private final AgentCodeProperties agentCodeProperties;
 
+    // 修复：initialDelay 与 fixedDelay 缺省值必须一致（统一为 5m）。
+    // 之前 initialDelay 缺省 1m、fixedDelay 缺省 5m，未显式配置时两次运行间隔会出现 1m→5m 的不一致
     @Scheduled(
-            initialDelayString = "${agentcode.agent.session.evict-interval:1m}",
+            initialDelayString = "${agentcode.agent.session.evict-interval:5m}",
             fixedDelayString = "${agentcode.agent.session.evict-interval:5m}")
     public void cleanup() {
         AgentCodeProperties.Session config = sessionConfig();

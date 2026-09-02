@@ -54,7 +54,9 @@ public class AgentContext {
      */
     List<String> projectContextFiles = new ArrayList<>(DEFAULT_PROJECT_CONTEXT_FILES);
 
-    StringBuilder sessionNotes = new StringBuilder(); // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
+    // M4 修复：ReactAgent 开启 parallelToolExecution(maxParallelTools=5) 后，SessionNoteTools
+    // 会并发调用 appendNote/updateNote，裸 StringBuilder 存在数据竞争，改为线程安全的 StringBuffer
+    StringBuffer sessionNotes = new StringBuffer(); // 会话笔记, 用于记录用户在本次会话中的主要要求或关键的短期记忆, 防止遗忘, 此字段应移入数据库存储或由本地持久化
 
     public AgentContext(Context context) {
         if (context.getWorkspace() == null || context.getWorkspace().isBlank()) {
@@ -64,6 +66,15 @@ public class AgentContext {
         if (context.getSessionNote() != null && !context.getSessionNote().isBlank()) {
             this.sessionNotes.append(context.getSessionNote());
         }
+    }
+
+    /**
+     * M4 兼容重载：历史调用点（如 MySQLAgentContextStore）传入的是 StringBuilder，
+     * 字段改为 StringBuffer 后由这里承接并拷贝内容。
+     * Lombok 对已存在同名方法会跳过生成 setter，因此不会与本重载冲突。
+     */
+    public void setSessionNotes(StringBuilder legacyNotes) {
+        this.sessionNotes = new StringBuffer(legacyNotes == null ? "" : legacyNotes.toString());
     }
 
     /** 未配置时使用的项目上下文文件顺序 */
@@ -84,7 +95,8 @@ public class AgentContext {
         }
 
         if (sessionNotes != null && !sessionNotes.isEmpty()) {
-            sb.append("\n\n## Session Notes\n").append(sessionNotes);
+            // M4: toString() 内部同步，拿到一致性快照，避免并行工具并发 append 时读到中间状态
+            sb.append("\n\n## Session Notes\n").append(sessionNotes.toString());
         }
         return sb.toString();
     }

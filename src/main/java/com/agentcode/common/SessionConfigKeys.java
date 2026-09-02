@@ -5,7 +5,8 @@ package com.agentcode.common;
  *
  * <p>这些键在 {@code AgentSessionFactory}、{@code AgentSession}、{@code AgentApprovalManager}
  * 之间共享，必须集中定义，避免字符串拼写不一致导致状态残留
- * （历史上 {@code __PENDING_INTERRUPTED__} 就因 remove 时少写尾部下划线而从未被清理）。
+ * （历史上 {@code PENDING_INTERRUPTIONS} 的键值曾误写为 {@code __PENDING_INTERRUPTED__}，
+ * 与键名不一致，导致 remove 时对不上号而从未被清理；现已统一为 {@code __PENDING_INTERRUPTIONS__}）。
  */
 public final class SessionConfigKeys {
 
@@ -16,7 +17,7 @@ public final class SessionConfigKeys {
     public static final String HANDLED_INTERRUPTION = "__HANDLED_INTERRUPTION__";
 
     /** 本轮还需要人工审批的工具反馈：toolCallId -> ToolFeedback */
-    public static final String PENDING_INTERRUPTIONS = "__PENDING_INTERRUPTED__";
+    public static final String PENDING_INTERRUPTIONS = "__PENDING_INTERRUPTIONS__";
 
     /** 用户已提交但尚未凑齐本轮审批的处理结果：toolCallId -> AgentInterruptHandle */
     public static final String PENDING_RESPONSES = "__PENDING_RESPONSES__";

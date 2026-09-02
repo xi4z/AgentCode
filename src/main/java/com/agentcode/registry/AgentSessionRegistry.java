@@ -31,11 +31,33 @@ public class AgentSessionRegistry {
 
     /**
      * 获取或创建会话，保证同一 runId 并发下只会创建一个 AgentSession。
+     *
+     * <p>重型创建（supplier 可能装配整个 ReactAgent）在 ConcurrentHashMap 桶锁外执行，
+     * 再以 putIfAbsent 提交：竞争失败者丢弃自建实例、使用胜者，
+     * 避免 computeIfAbsent 在同桶锁内执行耗时创建而阻塞同桶其他 key。
      */
     public AgentSession getOrCreate(String runId, Supplier<AgentSession> supplier) {
-        SessionEntry entry = sessions.computeIfAbsent(runId, id -> new SessionEntry(supplier.get()));
+        SessionEntry entry = sessions.get(runId);
+        if (entry == null) {
+            // 创建在锁外执行，不占用桶锁
+            SessionEntry created = new SessionEntry(supplier.get());
+            SessionEntry winner = sessions.putIfAbsent(runId, created);
+            entry = winner != null ? winner : created;
+        }
         entry.lastAccessAt = System.currentTimeMillis();
         return entry.session;
+    }
+
+    /**
+     * 查找已存在的会话；不存在返回 null 而不是抛 {@link SessionNotFoundException}。
+     * 适用于“先探测、未命中再创建”的场景。
+     */
+    public AgentSession getOrNull(String runId) {
+        if (runId == null) {
+            return null;
+        }
+        SessionEntry entry = sessions.get(runId);
+        return entry == null ? null : entry.session;
     }
 
     public AgentSession get(String runId) {
