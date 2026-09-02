@@ -19,12 +19,9 @@ public class MySQLAgentContextStore implements AgentContextStore {
 
     @Override
     public void save(String runId, AgentContext context) {
-        Context entity = toEntity(runId, context);
-        if (contextMapper.selectById(runId) == null) {
-            contextMapper.insert(entity);
-        } else {
-            contextMapper.updateById(entity);
-        }
+        // INSERT ... ON DUPLICATE KEY UPDATE 单条 SQL 原子 upsert，
+        // 替代原先 select→insert/update 的非原子 check-then-act，也省一次往返
+        contextMapper.upsert(toEntity(runId, context));
     }
 
     @Override

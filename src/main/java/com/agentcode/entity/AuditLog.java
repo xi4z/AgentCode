@@ -21,6 +21,11 @@ public class AuditLog {
 
     private String type;
 
+    /**
+     * 关联的会话 runId（取自 MDC "runId"，可能为 null）。
+     */
+    private String runId;
+
     private String model;
 
     private Long durationMs;
