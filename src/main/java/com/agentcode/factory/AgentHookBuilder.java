@@ -117,6 +117,12 @@ public class AgentHookBuilder {
             return this;
         }
 
+        /**
+         * 挂载长期记忆 Hook（beforeAgent 召回注入 / afterAgent 异步落库）。
+         *
+         * <p>异步语义：beforeAgent 的记忆召回在记忆专用线程池执行并带 3 秒超时，失败降级为空列表；
+         * afterAgent 的记忆抽取落库整体异步执行，本方法与 hook 回调均不阻塞主链路。
+         */
         public Builder withMemory(){
             MemoryHook memoryHook = new MemoryHook(memoryStore);
             hooks.add(memoryHook);

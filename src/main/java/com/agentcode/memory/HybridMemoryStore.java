@@ -56,8 +56,33 @@ public class HybridMemoryStore implements MemoryStore {
     private static final int HIT_TOP_K = 10;
     private static final int COSINE_TOP_K = 20;
 
-    private static final double MATCH_THRESHOLD = 0.85;
+    /**
+     * tryHit 向量命中阈值，<b>语义为真实余弦</b>（见 {@link #toCosine(Double)}：
+     * ES kNN 的 _score 是 (1+cosine)/2，历史上被直接当余弦用，导致阈值语义整体偏移）。
+     * <p>
+     * 真实余弦标定（qwen3.7-text-embedding-flash，1024 维）：
+     * <pre>
+     * 同义改写（应判同一条）        0.6952 / 0.7639 / 0.7860 / 0.8467 / 0.8666
+     * 同主题但事实不同（应各自独立）  0.5548 ~ 0.7115
+     * </pre>
+     * 0.80 落在这两组之间：高于"不同事实"的上界 0.7115，能抓回真正的同义改写。
+     * 旧值 0.85 在 _score 语义下等价真实余弦 0.70，会把"同主题不同事实"误判为同一条
+     * （实测把"写前端习惯用 React"并进"conventional commits 规范"），调数字前必须先确认单位。
+     * <p>
+     * 该阈值与具体 embedding 模型绑定，换模型必须重新标定；
+     * 回归用例见 scripts/memory-suite-large.mjs 的 G3（去重）与 G4（误合并）两组。
+     */
+    private static final double MATCH_THRESHOLD = 0.80;
     private static final double SESSION_QUALITY_THRESHOLD = 0.72;
+
+    /**
+     * 抽取 Agent 的最大尝试次数（含首次）。真实 chat 模型偶发超时后，图节点会把异常文本
+     * 当成模型输出返回；原实现一次失败就丢掉整轮记忆（大测试集实测 3/8 个批次静默全灭）。
+     */
+    private static final int EXTRACT_MAX_ATTEMPTS = 3;
+
+    /** 第 n 次重试前的退避毫秒（越界取末位）。抽取在记忆线程池异步执行，退避不阻塞主会话。 */
+    private static final long[] EXTRACT_BACKOFF_MS = {500L, 1500L};
 
     /**
      * 审计日志约定：事件名统一用 AUDIT_MEMORY_* 前缀，字段用 k=v，正文用 content="..." 包住。
@@ -72,25 +97,49 @@ public class HybridMemoryStore implements MemoryStore {
     private static final String ACTION_DELETE = "DELETE";
     private static final String ACTION_NONE = "NONE";
 
-    private final ReactAgent memoryAgent;
+    private final ChatModel chatModel;
     private final EmbeddingModel embeddingModel;
     private final ElasticsearchClient esClient;
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /**
+     * memory_agent 懒加载：不再构造函数里无条件 new（启动即建会拉起 ChatModel 相关初始化），
+     * 首次记忆抽取时才创建，见 {@link #lazyMemoryAgent()}。
+     */
+    private volatile ReactAgent memoryAgent;
 
     private volatile boolean indexInitialized = false;
 
     public HybridMemoryStore(ChatModel chatModel,
                              EmbeddingModel embeddingModel,
                              ElasticsearchClient esClient) {
+        this.chatModel = chatModel;
         this.embeddingModel = embeddingModel;
         this.esClient = esClient;
-        this.memoryAgent = ReactAgent.builder()
-                .name("memory_agent")
-                .description("一个用于分析输入对话中有什么值得记入长期记忆中的Agent")
-                .model(chatModel)
-                .systemPrompt(PromptConfig.MEMORY_PROMPT)
-                .outputType(RawMemories.class)
-                .build();
+        // memory_agent 改为懒加载，构造阶段只保存依赖，不创建 Agent。
+    }
+
+    /**
+     * memory_agent 懒加载（volatile 双检锁）：首次抽取记忆时才创建，避免启动即初始化模型链路。
+     */
+    private ReactAgent lazyMemoryAgent() {
+        ReactAgent agent = memoryAgent;
+        if (agent == null) {
+            synchronized (this) {
+                agent = memoryAgent;
+                if (agent == null) {
+                    agent = ReactAgent.builder()
+                            .name("memory_agent")
+                            .description("一个用于分析输入对话中有什么值得记入长期记忆中的Agent")
+                            .model(chatModel)
+                            .systemPrompt(PromptConfig.MEMORY_PROMPT)
+                            .outputType(RawMemories.class)
+                            .build();
+                    memoryAgent = agent;
+                }
+            }
+        }
+        return agent;
     }
 
     @Override
@@ -98,10 +147,12 @@ public class HybridMemoryStore implements MemoryStore {
         if (messages == null || messages.isEmpty()) {
             return;
         }
-        ensureIndex();
 
         long start = System.nanoTime();
         try {
+            // ensureIndex 放在 try 内：索引初始化失败也不能把异常漏给调用方，保持 save 整体吞异常语义。
+            ensureIndex();
+
             RawMemories memories = extractMemory(messages, runId);
             List<RawMemories.RawMemory> extracted =
                     (memories == null || memories.getMemories() == null) ? List.of() : memories.getMemories();
@@ -129,16 +180,15 @@ public class HybridMemoryStore implements MemoryStore {
         if (content == null || content.isBlank()) {
             return List.of();
         }
-        ensureIndex();
-
         long start = System.nanoTime();
-        List<Float> vector = embed(content);
-        if (vector.isEmpty()) {
-            log.warn("AUDIT_MEMORY_SEARCH_SKIPPED reason=emptyEmbedding query=\"{}\"", brief(content));
-            return List.of();
-        }
-
         try {
+            ensureIndex();
+            List<Float> vector = embed(content);
+            if (vector.isEmpty()) {
+                log.warn("AUDIT_MEMORY_SEARCH_SKIPPED reason=emptyEmbedding query=\"{}\"", brief(content));
+                return List.of();
+            }
+
             List<ScoredMemory> candidates = layeredSearch(content, vector, DEFAULT_SEARCH_TOP_K);
             List<MemoryRecord> result = reRank(candidates);
             log.info("AUDIT_MEMORY_SEARCH query=\"{}\" dims={} candidates={} returned={} topHits={} byType={} durationMs={}",
@@ -146,9 +196,11 @@ public class HybridMemoryStore implements MemoryStore {
                     summarize(result), countByType(result),
                     (System.nanoTime() - start) / 1_000_000);
             return result;
-        } catch (IOException e) {
+        } catch (Exception e) {
+            // 搜索失败降级为空列表，绝不把异常抛给主链路（ES 故障不应杀死整轮 run），
+            // 与 save() 的吞异常语义保持一致。
             log.warn("AUDIT_MEMORY_SEARCH_FAILED query=\"{}\" error={}", brief(content), e.getMessage(), e);
-            throw new RuntimeException("Search agent memory failed", e);
+            return List.of();
         }
     }
 
@@ -192,12 +244,41 @@ public class HybridMemoryStore implements MemoryStore {
                 candidate.getMeta().get("dedupeKey"), rawMemory.getExistingMemoryId(),
                 brief(candidate.getContent()));
 
+        // 向量腿先裁决"是不是同一条记忆"，LLM 给的 existingMemoryId 只作兜底。
+        // 必须放在 UPDATE 分支之前：否则近似重复会被 LLM 的 UPDATE 提前吸收，tryHit 只有在
+        // 真正新增时才有机会跑（实测一轮 0/23 命中，向量去重腿形同虚设）。
+        MemoryRecord matched = null;
+        try {
+            matched = findVectorMatch(candidate, vector);
+        } catch (IOException e) {
+            log.warn("AUDIT_MEMORY_DEDUPE_FAILED runId={} memoryId={} error={}",
+                    runId, candidate.getMemoryId(), e.getMessage(), e);
+        }
+
+        if (matched != null) {
+            String llmTarget = rawMemory.getExistingMemoryId();
+            if (ACTION_UPDATE.equals(action) && notBlank(llmTarget) && !llmTarget.equals(matched.getMemoryId())) {
+                // LLM 指错了合并目标：以向量结果为准，并留一行冲突痕迹便于回查抽取质量
+                log.info("AUDIT_MEMORY_DEDUPE_CONFLICT runId={} llmTarget={} vectorMatched={} content=\"{}\"",
+                        runId, llmTarget, matched.getMemoryId(), brief(candidate.getContent()));
+            }
+            // 命中同一条：必须走覆盖语义，保留抽取 Agent 归一化后的新表述与对应的新向量。
+            // 不能只调 strengthenMemory —— 那样内容不会被更新，UPDATE 意图会被静默降级成纯计数；
+            // 且 action=UPDATE 时候选记录的 id 就是 LLM 指定的目标 id，向量腿"命中"的正是它自己。
+            log.info("AUDIT_MEMORY_DEDUPE_VECTOR runId={} incomingId={} matchedId={} llmAction={} llmTarget={}",
+                    runId, candidate.getMemoryId(), matched.getMemoryId(), action,
+                    rawMemory.getExistingMemoryId());
+            updateExistingMemory(candidate, matched.getMemoryId(), vector);
+            return true;
+        }
+
         if (ACTION_UPDATE.equals(action) && notBlank(rawMemory.getExistingMemoryId())) {
+            // 向量未命中但 LLM 指名了 id：按 id 覆盖（id 查不到时内部会兜底新建）
             updateExistingMemory(candidate, rawMemory.getExistingMemoryId(), vector);
             return true;
         }
 
-        saveInternal(candidate, vector);
+        indexNewMemory(candidate, vector);
         return true;
     }
 
@@ -223,6 +304,20 @@ public class HybridMemoryStore implements MemoryStore {
             if (tryHit(candidate, vector)) {
                 return;
             }
+        } catch (IOException e) {
+            log.warn("AUDIT_MEMORY_ADD_FAILED memoryId={} runId={} error={}",
+                    candidate.getMemoryId(), metaValue(candidate, "runId"), e.getMessage(), e);
+            throw new RuntimeException("Save agent memory failed", e);
+        }
+        indexNewMemory(candidate, vector);
+    }
+
+    /**
+     * 直接落一条新记忆。向量去重已由调用方裁决完毕（applyRawMemory 的 findVectorMatch），
+     * 这里不再重复跑 tryHit，免得一次写入打两趟 ES。
+     */
+    private void indexNewMemory(MemoryRecord candidate, List<Float> vector) {
+        try {
             String esResult = indexMemory(candidate, vector);
             log.info("AUDIT_MEMORY_ADD memoryId={} runId={} type={} confidence={} ttl={} dims={} esResult={} content=\"{}\"",
                     candidate.getMemoryId(), metaValue(candidate, "runId"), candidate.getType(),
@@ -297,6 +392,9 @@ public class HybridMemoryStore implements MemoryStore {
         rememberHit(meta, candidate.getMeta() == null ? null : candidate.getMeta().get("runId"));
         existing.setMeta(meta);
 
+        // 覆盖更新同样是一次"命中强化"，因此也要走升级判定（否则向量命中会丢掉类型升级）
+        applyPromotionByHits(existing, meta);
+
         try {
             // content_vector 已变化，使用全量 index 覆盖，避免旧向量残留。
             String esResult = indexMemory(existing, vector);
@@ -351,14 +449,7 @@ public class HybridMemoryStore implements MemoryStore {
         target.setMeta(meta);
 
         // 基础升级策略：优先按“不同 runId 命中数”泛化，避免同一个会话内重复刷屏导致误升级。
-        int distinctHits = intValue(meta.get("distinctHitCount"), target.getHitCount());
-        if (target.getType() == MemoryRecord.MemoryType.SESSION && distinctHits >= 3) {
-            promoteType(target, MemoryRecord.MemoryType.PROJECT);
-        } else if (target.getType() == MemoryRecord.MemoryType.PROJECT && distinctHits >= 5) {
-            promoteType(target, MemoryRecord.MemoryType.GLOBAL);
-        } else if (target.getType() == MemoryRecord.MemoryType.GLOBAL && distinctHits >= 8) {
-            promoteType(target, MemoryRecord.MemoryType.USER);
-        }
+        int distinctHits = applyPromotionByHits(target, meta);
 
         updateMemory(target);
 
@@ -369,34 +460,70 @@ public class HybridMemoryStore implements MemoryStore {
     }
 
     /**
-     * 尝试命中一次已有记忆。
+     * 按"不同 runId 的命中数"做类型升级：SESSION -> PROJECT -> GLOBAL -> USER。
+     * <p>
+     * 用 distinctHitCount 而不是 hitCount，是为了避免同一会话内重复刷屏把记忆虚高升级。
+     * 强化（strengthen）与覆盖更新（update）两条路径共用，保证"被再次命中"这件事
+     * 无论走哪条路都能累积升级进度。
+     *
+     * @return 本次判定使用的 distinctHits，供审计日志输出
+     */
+    private int applyPromotionByHits(MemoryRecord target, Map<String, Object> meta) {
+        int distinctHits = intValue(meta.get("distinctHitCount"), target.getHitCount());
+        if (target.getType() == MemoryRecord.MemoryType.SESSION && distinctHits >= 3) {
+            promoteType(target, MemoryRecord.MemoryType.PROJECT);
+        } else if (target.getType() == MemoryRecord.MemoryType.PROJECT && distinctHits >= 5) {
+            promoteType(target, MemoryRecord.MemoryType.GLOBAL);
+        } else if (target.getType() == MemoryRecord.MemoryType.GLOBAL && distinctHits >= 8) {
+            promoteType(target, MemoryRecord.MemoryType.USER);
+        }
+        return distinctHits;
+    }
+
+    /**
+     * 尝试命中一次已有记忆：命中则强化旧记忆并返回 true。
      */
     private boolean tryHit(MemoryRecord memory, List<Float> vector) throws IOException {
-        List<ScoredMemory> candidates = hybridSearchByType(memory.getContent(), HIT_TOP_K, vector, memory.getType());
-        if (candidates.isEmpty()) {
-            log.debug("AUDIT_MEMORY_TRY_HIT memoryId={} candidates=0 result=MISS", memory.getMemoryId());
+        MemoryRecord matched = findVectorMatch(memory, vector);
+        if (matched == null) {
             return false;
+        }
+        strengthenMemory(memory, matched);
+        return true;
+    }
+
+    /**
+     * 向量判定口：找出与 incoming 属于"同一条记忆"的既有记录，找不到返回 null。
+     * <p>
+     * ADD 与 UPDATE 两条路径共用这一个裁决口 —— 否则抽取 Agent 一句 UPDATE 就绕过了向量去重，
+     * tryHit 只能在纯新增时跑到（实测 0/23 命中）。
+     * 判定条件 = 混排召回的候选 ∩ 同一 query 向量的真实余弦 >= {@code MATCH_THRESHOLD} ∩ 类型兼容。
+     */
+    private MemoryRecord findVectorMatch(MemoryRecord incoming, List<Float> vector) throws IOException {
+        List<ScoredMemory> candidates = hybridSearchByType(incoming.getContent(), HIT_TOP_K, vector, incoming.getType());
+        if (candidates.isEmpty()) {
+            log.debug("AUDIT_MEMORY_TRY_HIT memoryId={} candidates=0 result=MISS", incoming.getMemoryId());
+            return null;
         }
 
         Map<String, Double> cosineScores = vectorSearch(vector, COSINE_TOP_K);
         for (ScoredMemory candidate : candidates) {
             MemoryRecord existing = candidate.memory();
             double cosine = cosineScores.getOrDefault(existing.getMemoryId(), 0.0);
-            if (cosine >= MATCH_THRESHOLD && compatible(memory.getType(), existing.getType())) {
+            if (cosine >= MATCH_THRESHOLD && compatible(incoming.getType(), existing.getType())) {
                 log.info("AUDIT_MEMORY_TRY_HIT incomingId={} matchedId={} runId={} type={} cosine={} threshold={} rrfScore={} result=HIT",
-                        memory.getMemoryId(), existing.getMemoryId(), metaValue(memory, "runId"),
-                        memory.getType(), num(cosine), MATCH_THRESHOLD, num(candidate.esScore()));
-                strengthenMemory(memory, existing);
-                return true;
+                        incoming.getMemoryId(), existing.getMemoryId(), metaValue(incoming, "runId"),
+                        incoming.getType(), num(cosine), MATCH_THRESHOLD, num(candidate.esScore()));
+                return existing;
             }
             if (log.isDebugEnabled()) {
                 log.debug("AUDIT_MEMORY_TRY_HIT incomingId={} candidateId={} candidateType={} cosine={} threshold={} compatible={} result=SKIP",
-                        memory.getMemoryId(), existing.getMemoryId(), existing.getType(),
-                        num(cosine), MATCH_THRESHOLD, compatible(memory.getType(), existing.getType()));
+                        incoming.getMemoryId(), existing.getMemoryId(), existing.getType(),
+                        num(cosine), MATCH_THRESHOLD, compatible(incoming.getType(), existing.getType()));
             }
         }
-        log.debug("AUDIT_MEMORY_TRY_HIT incomingId={} candidates={} result=MISS", memory.getMemoryId(), candidates.size());
-        return false;
+        log.debug("AUDIT_MEMORY_TRY_HIT incomingId={} candidates={} result=MISS", incoming.getMemoryId(), candidates.size());
+        return null;
     }
 
     /**
@@ -561,10 +688,30 @@ public class HybridMemoryStore implements MemoryStore {
         Map<String, Double> scores = new HashMap<>();
         for (Hit<MemoryRecord> hit : response.hits().hits()) {
             if (hit.source() != null && hit.source().getMemoryId() != null) {
-                scores.put(hit.source().getMemoryId(), hit.score());
+                scores.put(hit.source().getMemoryId(), toCosine(hit.score()));
             }
         }
         return scores;
+    }
+
+    /**
+     * 把 ES kNN 的 {@code _score} 还原成真实余弦相似度。
+     * <p>
+     * ES 对 {@code similarity: cosine} 的 dense_vector，kNN 返回的 _score 不是原始余弦，
+     * 而是被映射到 [0,1] 的 {@code (1 + cosine) / 2}。直接当余弦用会让所有阈值语义整体上移：
+     * 例如 {@code MATCH_THRESHOLD = 0.85} 实际等价于真实余弦 0.70。
+     * <p>
+     * 实测对照（qwen3.7-text-embedding-flash）：离线算得真实余弦 0.6416 的一条文本对，
+     * ES _score 返回 0.817 ≈ (1 + 0.6416) / 2，与映射公式一致。
+     * <p>
+     * 本方法是余弦语义的唯一出口，tryHit 阈值、SESSION 层质量门槛、业务重排公式
+     * 因此统一工作在文档所声明的真实余弦上。int8_hnsw 量化带来的零点几偏差属正常噪声。
+     */
+    private static double toCosine(Double esScore) {
+        if (esScore == null) {
+            return 0.0;
+        }
+        return Math.max(-1.0, Math.min(1.0, 2.0 * esScore - 1.0));
     }
 
     private Query buildQuery(String query, MemoryRecord.MemoryType type) {
@@ -738,35 +885,91 @@ public class HybridMemoryStore implements MemoryStore {
                 .build();
     }
 
+    /**
+     * 抽取记忆：失败自动重试。
+     * <p>
+     * 真实 chat 模型偶发超时后，图节点会把异常文本当成模型回答返回（实测 payload 以 Exception 开头），
+     * 旧实现一次失败就丢掉整轮记忆，而且丢失方式有两种：解析抛异常，以及「输出里没有 JSON」被当成
+     * 无可抽取内容静默返回 extracted=0。大测试集实测 3/8 个声明批次因此全灭。
+     * <p>
+     * 现在把「调用异常 / 输出不可解析 / 无 JSON 负载 / 空响应」统一视为可重试，最多
+     * EXTRACT_MAX_ATTEMPTS 次并退避；确定性错误（prompt 构建失败）不重试。
+     * 全部尝试仍失败时抛给 save() 按既有语义吞掉，但会留下 AUDIT_MEMORY_EXTRACT_GIVEUP，
+     * 不再伪装成「本轮没有值得记的内容」。
+     */
     private RawMemories extractMemory(List<Message> messages, String runId) {
-        long start = System.nanoTime();
-        try {
-            RunnableConfig runnableConfig = RunnableConfig.builder()
-                    .threadId((runId == null ? "" : runId) + "_MEMORY")
-                    .build();
-
-            UserMessage userMessage = new UserMessage(buildMemoryPrompt(messages, runId));
-            AssistantMessage call = memoryAgent.call(userMessage, runnableConfig);
-            RawMemories rawMemories = parseRawMemories(call.getText());
-            log.info("AUDIT_MEMORY_EXTRACT_AGENT runId={} memories={} durationMs={}",
-                    runId, rawMemories.getMemories().size(), (System.nanoTime() - start) / 1_000_000);
-            if (log.isDebugEnabled()) {
-                // 抽取 Agent 的原始输出：定位“为什么没记住 / 为什么记错”时最关键的一行。
-                log.debug("AUDIT_MEMORY_EXTRACT_RAW runId={} payload={}", runId, brief(call.getText()));
+        RuntimeException lastError = null;
+        for (int attempt = 1; attempt <= EXTRACT_MAX_ATTEMPTS; attempt++) {
+            long start = System.nanoTime();
+            try {
+                RawMemories rawMemories = extractOnce(messages, runId);
+                log.info("AUDIT_MEMORY_EXTRACT_AGENT runId={} memories={} attempt={}/{} durationMs={}",
+                        runId, rawMemories.getMemories().size(), attempt, EXTRACT_MAX_ATTEMPTS,
+                        (System.nanoTime() - start) / 1_000_000);
+                return rawMemories;
+            } catch (JsonProcessingException e) {
+                // prompt 构建失败是确定性错误，重试没有意义
+                log.warn("AUDIT_MEMORY_EXTRACT_FAILED runId={} stage=prompt error={}", runId, e.getMessage(), e);
+                throw new RuntimeException("Failed to build memory extraction prompt", e);
+            } catch (IOException e) {
+                log.warn("AUDIT_MEMORY_EXTRACT_FAILED runId={} stage=existingMemories attempt={}/{} retryable=true error={}",
+                        runId, attempt, EXTRACT_MAX_ATTEMPTS, e.getMessage(), e);
+                lastError = new RuntimeException("Failed to collect existing memories", e);
+            } catch (RetryableExtractionException e) {
+                log.warn("AUDIT_MEMORY_EXTRACT_FAILED runId={} stage=agent attempt={}/{} durationMs={} retryable=true error={}",
+                        runId, attempt, EXTRACT_MAX_ATTEMPTS, (System.nanoTime() - start) / 1_000_000, e.getMessage());
+                lastError = e;
             }
-            return rawMemories;
+            if (attempt < EXTRACT_MAX_ATTEMPTS) {
+                long backoff = EXTRACT_BACKOFF_MS[Math.min(attempt - 1, EXTRACT_BACKOFF_MS.length - 1)];
+                log.info("AUDIT_MEMORY_EXTRACT_RETRY runId={} nextAttempt={}/{} backoffMs={}",
+                        runId, attempt + 1, EXTRACT_MAX_ATTEMPTS, backoff);
+                sleepBeforeRetry(backoff);
+            }
+        }
+        log.warn("AUDIT_MEMORY_EXTRACT_GIVEUP runId={} attempts={} lastError={}",
+                runId, EXTRACT_MAX_ATTEMPTS, lastError == null ? "unknown" : String.valueOf(lastError.getMessage()));
+        throw lastError != null ? lastError : new RuntimeException("Memory extraction failed");
+    }
+
+    /** 单次抽取：调用抽取 Agent 并解析输出。可重试的失败统一抛 RetryableExtractionException。 */
+    private RawMemories extractOnce(List<Message> messages, String runId)
+            throws JsonProcessingException, IOException {
+        RunnableConfig runnableConfig = RunnableConfig.builder()
+                .threadId((runId == null ? "" : runId) + "_MEMORY")
+                .build();
+
+        UserMessage userMessage = new UserMessage(buildMemoryPrompt(messages, runId));
+        AssistantMessage call;
+        try {
+            call = lazyMemoryAgent().call(userMessage, runnableConfig);
         } catch (GraphRunnerException e) {
-            log.warn("AUDIT_MEMORY_EXTRACT_FAILED runId={} stage=agent durationMs={} error={}",
-                    runId, (System.nanoTime() - start) / 1_000_000, e.getMessage(), e);
-            throw new RuntimeException(e);
-        } catch (JsonProcessingException e) {
-            log.warn("AUDIT_MEMORY_EXTRACT_FAILED runId={} stage=prompt durationMs={} error={}",
-                    runId, (System.nanoTime() - start) / 1_000_000, e.getMessage(), e);
-            throw new RuntimeException("Failed to build memory extraction prompt", e);
-        } catch (IOException e) {
-            log.warn("AUDIT_MEMORY_EXTRACT_FAILED runId={} stage=existingMemories durationMs={} error={}",
-                    runId, (System.nanoTime() - start) / 1_000_000, e.getMessage(), e);
-            throw new RuntimeException("Failed to collect existing memories", e);
+            throw new RetryableExtractionException("agent call failed: " + e.getMessage(), e);
+        }
+        if (log.isDebugEnabled()) {
+            // 抽取 Agent 的原始输出：定位「为什么没记住 / 为什么记错」时最关键的一行。
+            log.debug("AUDIT_MEMORY_EXTRACT_RAW runId={} payload={}", runId, brief(call.getText()));
+        }
+        return parseRawMemories(call.getText(), runId);
+    }
+
+    private static void sleepBeforeRetry(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RetryableExtractionException("interrupted while backing off before retry", e);
+        }
+    }
+
+    /** 抽取阶段可重试的失败：模型调用异常、输出不可解析、无 JSON 负载、空响应。 */
+    private static class RetryableExtractionException extends RuntimeException {
+        RetryableExtractionException(String message) {
+            super(message);
+        }
+
+        RetryableExtractionException(String message, Throwable cause) {
+            super(message, cause);
         }
     }
 
@@ -839,20 +1042,32 @@ public class HybridMemoryStore implements MemoryStore {
         return payload;
     }
 
-    private RawMemories parseRawMemories(String text) throws JsonProcessingException {
+    /**
+     * 解析抽取 Agent 的输出。
+     * <p>
+     * 关键区分：{@code {"memories":[]}} 才是「本轮确实没有值得记的内容」（正常结果，不重试）；
+     * 空响应、无 JSON、解析失败、字面量 null 都说明上游出了问题，按可重试失败抛出。
+     */
+    private RawMemories parseRawMemories(String text, String runId) throws JsonProcessingException {
+        if (text == null || text.isBlank()) {
+            throw new RetryableExtractionException("blank response");
+        }
         String json = extractJsonObject(text);
         if (json.isEmpty()) {
-            log.info("AUDIT_MEMORY_EXTRACT_EMPTY reason=noJsonContent payload={}", brief(text));
-            return new RawMemories(List.of());
+            throw new RetryableExtractionException("no json payload, response=" + brief(text));
         }
 
         RawMemories memories;
         try {
             memories = objectMapper.readValue(json, RawMemories.class);
         } catch (JsonProcessingException e) {
-            log.warn("AUDIT_MEMORY_EXTRACT_PARSE_FAILED error={} payload={}",
-                    e.getOriginalMessage(), brief(json));
-            throw e;
+            log.warn("AUDIT_MEMORY_EXTRACT_PARSE_FAILED runId={} error={} payload={}",
+                    runId, e.getOriginalMessage(), brief(json));
+            throw new RetryableExtractionException("unparsable payload: " + e.getOriginalMessage(), e);
+        }
+        if (memories == null) {
+            // 模型输出字面量 null 不是「无可抽取记忆」，而是上游异常输出，交给重试
+            throw new RetryableExtractionException("literal null payload");
         }
         if (memories.getMemories() == null) {
             memories.setMemories(List.of());
