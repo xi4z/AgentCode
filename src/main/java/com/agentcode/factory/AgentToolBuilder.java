@@ -2,7 +2,7 @@ package com.agentcode.factory;
 
 import com.agentcode.agent.AgentContext;
 import com.agentcode.memory.MemoryStore;
-import com.agentcode.tools.MemorySearchTools;
+import com.agentcode.tools.MemoryTools;
 import com.alibaba.cloud.ai.graph.agent.AgentTool;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import lombok.RequiredArgsConstructor;
@@ -24,7 +24,7 @@ public class AgentToolBuilder {
 
     private final ChatModel chatModel;
 
-    /** 长期记忆库：memory_search 工具需要，故在 builder 层透传给 Builder。 */
+    /** 长期记忆库（文件式）：memory_search / memory_write / memory_forget 工具需要，透传给 Builder。 */
     private final MemoryStore memoryStore;
 
     public Builder builder(AgentContext agentContext) {
@@ -101,8 +101,10 @@ public class AgentToolBuilder {
         }
 
         /**
-         * 长期记忆查询工具（拉取式召回）。
-         * 取代原先 MemoryHook.beforeAgent 的每轮主动注入：实测会把大半个记忆库灌进提示词。
+         * 长期记忆工具组（文件式拉取召回 + 模型自主写入/遗忘）。
+         * 取代旧链路：beforeAgent 每轮主动注入 → 实测把大半个库灌进提示词；
+         * afterAgent 后台抽取 + ES 向量去重 → 复杂度不成比例。现在记忆 = markdown 文件，
+         * 索引随会话起点注入，全文检索与增删都由模型调用这三个工具完成。
          */
         public Builder withMemoryTools(){
             if (memoryStore == null) {
@@ -110,7 +112,7 @@ public class AgentToolBuilder {
             }
             convertCallbacksToMap(
                     MethodToolCallbackProvider.builder()
-                            .toolObjects(new MemorySearchTools(memoryStore))
+                            .toolObjects(new MemoryTools(memoryStore))
                             .build()
                             .getToolCallbacks());
             return this;

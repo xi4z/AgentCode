@@ -3,9 +3,7 @@ package com.agentcode.factory;
 import com.agentcode.agent.AgentContext;
 import com.agentcode.hooks.CheckpointAgentMetricsHook;
 import com.agentcode.hooks.CheckpointModelMetricsHook;
-import com.agentcode.hooks.MemoryHook;
 import com.agentcode.hooks.UpdateSessionNotesHook;
-import com.agentcode.memory.MemoryStore;
 import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.store.AgentContextStore;
 import com.alibaba.cloud.ai.graph.agent.hook.Hook;
@@ -33,10 +31,9 @@ public class AgentHookBuilder {
     private final ChatModel chatModel;
     private final AgentCodeProperties properties;
     private final AgentContextStore agentContextStore;
-    private final MemoryStore memoryStore;
 
     public Builder builder(AgentContext agentContext) {
-        return new Builder(chatModel, properties, agentContext, agentContextStore, memoryStore);
+        return new Builder(chatModel, properties, agentContext, agentContextStore);
     }
 
     public static class Builder {
@@ -47,14 +44,12 @@ public class AgentHookBuilder {
         private final String workspace;
         private final List<Hook> hooks = new ArrayList<>();
         private ShellTool2 shellTool2;
-        private final MemoryStore memoryStore;
 
-        private Builder(ChatModel chatModel, AgentCodeProperties properties, AgentContext agentContext, AgentContextStore store, MemoryStore memoryStore) {
+        private Builder(ChatModel chatModel, AgentCodeProperties properties, AgentContext agentContext, AgentContextStore store) {
             this.chatModel = chatModel;
             this.properties = properties;
             this.store = store;
             this.workspace = agentContext.getWorkspace();
-            this.memoryStore = memoryStore;
         }
 
 
@@ -114,20 +109,6 @@ public class AgentHookBuilder {
                         .build());
             }
             hooks.add(hitlBuilder.build());
-            return this;
-        }
-
-        /**
-         * 挂载长期记忆 Hook（<b>只负责写入侧</b>）。
-         *
-         * <p>beforeAgent 仅记录「本轮记忆起点」（最后一条 user 消息下标），不做召回；回忆改由模型
-         * 按需调用 {@code memory_search} 工具完成（见 {@link com.agentcode.tools.MemorySearchTools}）——
-         * 原先每轮主动注入实测会把大半个记忆库灌进提示词。afterAgent 的记忆抽取落库在记忆专用线程池
-         * 异步执行，本方法与 hook 回调均不阻塞主链路。
-         */
-        public Builder withMemory(){
-            MemoryHook memoryHook = new MemoryHook(memoryStore);
-            hooks.add(memoryHook);
             return this;
         }
 

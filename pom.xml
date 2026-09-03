@@ -102,12 +102,8 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!-- Elasticsearch Java Client：支持倒排检索（BM25）与 dense_vector/kNN 向量检索
-             （HybridMemoryStore 直接使用原生 ElasticsearchClient，无需 Spring AI VectorStore starter） -->
-        <dependency>
-            <groupId>co.elastic.clients</groupId>
-            <artifactId>elasticsearch-java</artifactId>
-        </dependency>
+        <!-- 长期记忆已改为文件式存储（com.agentcode.memory.FileMemoryStore），
+             不再依赖 Elasticsearch；历史上的 elasticsearch-java + dense_vector/kNN 方案已移除。 -->
 
         <dependency>
             <groupId>org.projectlombok</groupId>

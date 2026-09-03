@@ -3,6 +3,7 @@ package com.agentcode.factory;
 import com.agentcode.agent.AgentContext;
 import com.agentcode.dto.AgentApprovalManager;
 import com.agentcode.dto.ApprovalPolicy;
+import com.agentcode.memory.MemoryStore;
 import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.agent.AgentSession;
 import com.agentcode.agent.AgentSessionRuntime;
@@ -34,6 +35,7 @@ public class AgentSessionFactory {
     private final AgentHookBuilder agentHookBuilder;
     private final AgentToolBuilder agentToolBuilder;
     private final AgentInterceptorBuilder agentInterceptorBuilder;
+    private final MemoryStore memoryStore;
 
 
     public AgentSession create(AgentContext agentContext) {
@@ -56,18 +58,17 @@ public class AgentSessionFactory {
         AgentApprovalManager approvalManager = new AgentApprovalManager(
                 agentContext, ApprovalPolicy.from(agentConfig.getApproval()));
 
-        // 拼接提示词
+        // 拼接提示词。长期记忆索引在这里一次性装配进 system prompt（对齐 Claude Code 的
+        // session-start 载入；旧 beforeAgent 逐轮注入实测会把大半个库灌进提示词）。
+        // 会话中途写入的新记忆不回灌本快照——全文与最新状态由 memory_* 工具实时读写文件。
         String systemPrompt = options.getSystemPrompt();
+        String memoryBlock = memoryStore == null ? "" : memoryStore.buildPromptBlock(agentContext.getWorkspace());
         AgentHookBuilder.Result result = agentHookBuilder.builder(agentContext)
                 .withModelCallLimit()
                 .withSummarization()
                 .withShellTool()
                 .withApproval(approvalTools)
                 .withSkills()
-                // 长期记忆钩子：只承担写入侧（记录起点 + 异步抽取落库），不再做召回注入；
-                // 回忆由模型按需调用 memory_search 工具完成，因此放在 withUpdateSessionNotes 之前
-                // 仅按“先记忆后笔记”的语义排列，两者顺序无副作用。
-                .withMemory()
                 .withUpdateSessionNotes()
                 .withCheckpointMetrics()
                 .build();
@@ -78,7 +79,9 @@ public class AgentSessionFactory {
                 .model(chatModel)
                 .parallelToolExecution(true) // 开启并发调用
                 .maxParallelTools(5)
-                .systemPrompt(agentContext.systemPrompt(systemPrompt))
+                .systemPrompt(memoryBlock.isBlank()
+                        ? agentContext.systemPrompt(systemPrompt)
+                        : agentContext.systemPrompt(systemPrompt) + "\n\n" + memoryBlock)
                 .saver(saver)
                 .toolContext(Map.of(SessionConfigKeys.AGENT_CONTEXT, agentContext))
                 .tools(agentToolBuilder.builder(agentContext).mainAgent().withSubAgent(this.createSubAgent(agentContext)).build())

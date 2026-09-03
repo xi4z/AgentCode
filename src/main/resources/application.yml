@@ -26,18 +26,13 @@ spring:
       schema-locations: ${DB_SCHEMA_LOCATIONS:classpath:schema.sql}
       continue-on-error: ${DB_INIT_CONTINUE_ON_ERROR:false}
 
-  elasticsearch:
-    uris: ${ES_URIS:http://localhost:9200}
-    connection-timeout: ${ES_CONNECTION_TIMEOUT:5s}
-    socket-timeout: ${ES_SOCKET_TIMEOUT:30s}
-
   ai:
     model:
       # openai / dashscope / anthropic / ollama
       chat: ${AI_MODEL_PROVIDER:openai}
-      # 长期记忆 HybridMemoryStore 需要 EmbeddingModel。
-      # 如果同时引入 OpenAI / DashScope starter，必须显式选择 embedding 模型 provider。
-      embedding: ${AI_EMBEDDING_MODEL_PROVIDER:openai}
+      # 长期记忆已改为文件式（FileMemoryStore，markdown + 关键词检索），不再需要 EmbeddingModel；
+      # 默认 none 关掉 embedding 自动装配。如未来恢复向量检索，显式设置 provider 即可。
+      embedding: ${AI_EMBEDDING_MODEL_PROVIDER:none}
       # 下面这些子模型项目里没有用到，但 spring-ai-starter-model-openai 的对应自动装配
       # 只受 spring.ai.model.<type> 控制：不显式设成 none 时，即使 chat/embedding 走 dashscope，
       # OpenAiAudioSpeechAutoConfiguration 等仍会实例化并要求 spring.ai.openai.api-key，
@@ -104,6 +99,8 @@ agentcode:
     system-prompt: ${AGENT_SYSTEM_PROMPT:You are a helpful AI assistant. Use the available tools to complete the user's goal. When the goal is fully achieved, respond with a final answer and do not call any more tools.}
     global-context-file: ${AGENT_GLOBAL_CONTEXT_FILE:~/.agent/context.md}
     project-context-file: ${AGENT_PROJECT_CONTEXT_FILE:.agent/context.md}
+    # 长期记忆全局层根目录（项目层固定在 <workspace>/.agent/memory，不受此项影响）
+    memory-dir: ${AGENT_MEMORY_DIR:~/.agent/memory}
 
     # 需要在调用前人工审批的工具；逗号分隔，未配置时用内置 shell,write_file,edit_file
     approval-tools: ${AGENT_APPROVAL_TOOLS:shell,write_file,edit_file}

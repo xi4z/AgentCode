@@ -23,6 +23,7 @@ import java.util.List;
  *     system-prompt: ...
  *     global-context-file: ~/.agent/context.md
  *     project-context-file: .agent/context.md
+ *     memory-dir: ~/.agent/memory
  *     approval-tools: [shell, write_file, edit_file]
  *     approval:
  *       allow-patterns: ["git status*"]
@@ -88,6 +89,12 @@ public class AgentCodeProperties {
 
         /** 项目上下文文件（相对 workspace），不存在时回退到 AGENT.md/CLAUDE.md/SOUL.md */
         private String projectContextFile = ".agent/context.md";
+
+        /**
+         * 长期记忆全局层根目录（支持 ~ 前缀）。每条记忆一个 markdown 文件 + MEMORY.md 索引；
+         * 项目层记忆固定落在 {@code <workspace>/.agent/memory/}，不受本配置影响。
+         */
+        private String memoryDir = "~/.agent/memory";
 
         /**
          * 需要在调用前人工审批的工具名列表。
