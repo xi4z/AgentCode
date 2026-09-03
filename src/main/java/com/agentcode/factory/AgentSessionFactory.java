@@ -64,9 +64,9 @@ public class AgentSessionFactory {
                 .withShellTool()
                 .withApproval(approvalTools)
                 .withSkills()
-                // 长期记忆钩子：recall 必须发生在模型调用之前，才能把相关长期记忆注入进本轮上下文；
-                // 放在 withUpdateSessionNotes 之前，保证记忆召回优先于会话笔记更新（两者都在模型调用前执行，
-                // 顺序无副作用，此处按“先记忆后笔记”的语义排列）。
+                // 长期记忆钩子：只承担写入侧（记录起点 + 异步抽取落库），不再做召回注入；
+                // 回忆由模型按需调用 memory_search 工具完成，因此放在 withUpdateSessionNotes 之前
+                // 仅按“先记忆后笔记”的语义排列，两者顺序无副作用。
                 .withMemory()
                 .withUpdateSessionNotes()
                 .withCheckpointMetrics()

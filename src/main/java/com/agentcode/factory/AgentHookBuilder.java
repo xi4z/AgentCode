@@ -118,10 +118,12 @@ public class AgentHookBuilder {
         }
 
         /**
-         * 挂载长期记忆 Hook（beforeAgent 召回注入 / afterAgent 异步落库）。
+         * 挂载长期记忆 Hook（<b>只负责写入侧</b>）。
          *
-         * <p>异步语义：beforeAgent 的记忆召回在记忆专用线程池执行并带 3 秒超时，失败降级为空列表；
-         * afterAgent 的记忆抽取落库整体异步执行，本方法与 hook 回调均不阻塞主链路。
+         * <p>beforeAgent 仅记录「本轮记忆起点」（最后一条 user 消息下标），不做召回；回忆改由模型
+         * 按需调用 {@code memory_search} 工具完成（见 {@link com.agentcode.tools.MemorySearchTools}）——
+         * 原先每轮主动注入实测会把大半个记忆库灌进提示词。afterAgent 的记忆抽取落库在记忆专用线程池
+         * 异步执行，本方法与 hook 回调均不阻塞主链路。
          */
         public Builder withMemory(){
             MemoryHook memoryHook = new MemoryHook(memoryStore);

@@ -1,6 +1,8 @@
 package com.agentcode.factory;
 
 import com.agentcode.agent.AgentContext;
+import com.agentcode.memory.MemoryStore;
+import com.agentcode.tools.MemorySearchTools;
 import com.alibaba.cloud.ai.graph.agent.AgentTool;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import lombok.RequiredArgsConstructor;
@@ -22,25 +24,30 @@ public class AgentToolBuilder {
 
     private final ChatModel chatModel;
 
+    /** 长期记忆库：memory_search 工具需要，故在 builder 层透传给 Builder。 */
+    private final MemoryStore memoryStore;
 
     public Builder builder(AgentContext agentContext) {
-        return new Builder(agentContext);
+        return new Builder(agentContext, memoryStore);
     }
 
     public static class Builder {
 
         private final String workspace;
+        private final MemoryStore memoryStore;
         private final Map<String,ToolCallback> toolCallbacks = new LinkedHashMap<>(); // 使用 Linked 是因为保留顺序
 
 
-        public Builder(AgentContext agentContext) {
+        public Builder(AgentContext agentContext, MemoryStore memoryStore) {
             this.workspace = agentContext.getWorkspace();
+            this.memoryStore = memoryStore;
         }
 
         public Builder mainAgent(){
             this.withSearchTools();
             this.withFileSystemTools();
             this.withSessionNotesTools();
+            this.withMemoryTools();
             return this;
         }
 
@@ -88,6 +95,22 @@ public class AgentToolBuilder {
                     MethodToolCallbackProvider.builder()
                             .toolObjects(
                                     new SessionNoteTools())
+                            .build()
+                            .getToolCallbacks());
+            return this;
+        }
+
+        /**
+         * 长期记忆查询工具（拉取式召回）。
+         * 取代原先 MemoryHook.beforeAgent 的每轮主动注入：实测会把大半个记忆库灌进提示词。
+         */
+        public Builder withMemoryTools(){
+            if (memoryStore == null) {
+                return this;   // 未装配记忆库时静默不注册，不影响其它工具
+            }
+            convertCallbacksToMap(
+                    MethodToolCallbackProvider.builder()
+                            .toolObjects(new MemorySearchTools(memoryStore))
                             .build()
                             .getToolCallbacks());
             return this;
