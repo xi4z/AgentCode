@@ -153,6 +153,7 @@ public class HybridMemoryStore implements MemoryStore {
             // ensureIndex 放在 try 内：索引初始化失败也不能把异常漏给调用方，保持 save 整体吞异常语义。
             ensureIndex();
 
+            // 获取未经处理的可能新增记忆
             RawMemories memories = extractMemory(messages, runId);
             List<RawMemories.RawMemory> extracted =
                     (memories == null || memories.getMemories() == null) ? List.of() : memories.getMemories();
@@ -208,6 +209,8 @@ public class HybridMemoryStore implements MemoryStore {
         if (rawMemory == null) {
             return false;
         }
+
+        // 检查一下需要的记忆
 
         String action = normalizeAction(rawMemory.getAction());
 
@@ -942,6 +945,8 @@ public class HybridMemoryStore implements MemoryStore {
         UserMessage userMessage = new UserMessage(buildMemoryPrompt(messages, runId));
         AssistantMessage call;
         try {
+            // 需要给 Agent 增加 search 记忆功能, 确保能够生成 Action 来调动记忆删改
+            // 比如用户给了一个会话内负面词, Agent 需要使用这个负面词来解决
             call = lazyMemoryAgent().call(userMessage, runnableConfig);
         } catch (GraphRunnerException e) {
             throw new RetryableExtractionException("agent call failed: " + e.getMessage(), e);

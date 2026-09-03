@@ -54,23 +54,6 @@ public class MemoryHook extends AgentHook {
         return thread;
     });
 
-    /** 起点缓存容量上限：正常都会被 afterAgent 取走，上限只为兜住异常路径不涨内存。 */
-    private static final int START_INDEX_CAPACITY = 512;
-
-    /**
-     * runId -> 本轮记忆起点（最后一条 user 消息下标）。
-     * <p>
-     * 存在 hook 里而不是写进 graph state：state 的自定义键没有注册更新策略，
-     * 写进去不保证可见（本仓库其它 hook 只读 iterations/tokenUsage 这类既有键）。
-     */
-    private final Map<String, Integer> memoryStartIndex = Collections.synchronizedMap(
-            new LinkedHashMap<>(64, 0.75f, false) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, Integer> eldest) {
-                    return size() > START_INDEX_CAPACITY;
-                }
-            });
-
     private final MemoryStore memoryStore;
 
     public MemoryHook(MemoryStore memoryStore) {
@@ -84,37 +67,21 @@ public class MemoryHook extends AgentHook {
 
     @Override
     @SuppressWarnings("unchecked")
-    public CompletableFuture<Map<String, Object>> beforeAgent(OverAllState state, RunnableConfig config) {
-        List<Message> messages = (List<Message>) state.value("messages").orElse(new ArrayList<>());
-        int start = lastUserIndex(messages);
-        if (start >= 0) {
-            config.threadId().ifPresent(runId -> memoryStartIndex.put(runId, start));
-        }
-        if (log.isDebugEnabled()) {
-            log.debug("AUDIT_MEMORY_TRACE_START runId={} messages={} startIndex={}",
-                    config.threadId().orElse("-"), messages.size(), start);
-        }
-        // 只做记录，不返回任何 state 更新：召回已改由 memory_search 工具按需触发
-        return super.beforeAgent(state, config);
-    }
-
-    @Override
-    @SuppressWarnings("unchecked")
     public CompletableFuture<Map<String, Object>> afterAgent(OverAllState state, RunnableConfig config) {
+        // 检查本次是否是工具校验
+        Optional<Object> isHumanFeedBack = state.value("human_feedback");
+        if (isHumanFeedBack.isPresent()) { // 如果他存在, 即证明本次有工具校验, 先不需要检查
+            return super.afterAgent(state, config);
+        }
+
+        // 检查 config 内的 ThreadId 是否存在
         Optional<String> runId = config.threadId();
         if (runId.isEmpty() || runId.get().isBlank()) {
             return super.afterAgent(state, config);
         }
         List<Message> messages = (List<Message>) state.value("messages").orElse(new ArrayList<>());
 
-        // 优先用 beforeAgent 记下的起点；取不到就自己扫一遍兜底
-        // （审批恢复、纯续跑等路径可能没经过 beforeAgent）。
-        Integer recorded = memoryStartIndex.remove(runId.get());
-        int start = recorded == null ? lastUserIndex(messages) : recorded;
-        // 中途发生摘要/压缩时，记下的下标可能已越过当前列表长度，退回重新扫描。
-        if (start < 0 || start >= messages.size()) {
-            start = lastUserIndex(messages);
-        }
+        int start = lastUserIndex(messages);
         if (start < 0) {
             // 本轮没有 user 消息（纯续跑/审批恢复）时不值得抽取。
             return super.afterAgent(state, config);
