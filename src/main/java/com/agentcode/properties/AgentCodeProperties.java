@@ -79,7 +79,7 @@ public class AgentCodeProperties {
     @Data
     public static class Agent {
         /** 单次 run 允许的最大模型调用次数 */
-        private int maxSteps = 20;
+        private int maxSteps = 12;
 
         /** 基础系统提示词，为空时只拼接上下文 */
         private String systemPrompt;

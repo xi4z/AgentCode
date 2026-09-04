@@ -67,8 +67,8 @@ public class AuditedChatModel implements ChatModel {
             // 同步异常路径同样要留下失败审计
             if (enabled) {
                 long durationMs = (System.nanoTime() - start) / 1_000_000;
-                log.warn("AUDIT_AI_CALL_ERROR model={} durationMs={} promptMessages={} error={}",
-                        resolveModel(null, prompt), durationMs,
+                log.warn("AUDIT_AI_CALL_ERROR runId={} model={} durationMs={} promptMessages={} error={}",
+                        resolveRunId(), resolveModel(null, prompt), durationMs,
                         prompt.getInstructions().size(), e.getMessage());
                 persist("AI_CALL_ERROR", resolveModel(null, prompt), durationMs,
                         prompt.getInstructions().size(), null, 0, 0,
@@ -84,8 +84,8 @@ public class AuditedChatModel implements ChatModel {
             int responseLength = responseLength(response);
             int toolCalls = toolCalls(response);
             log.info(
-                    "AUDIT_AI_CALL model={} durationMs={} promptMessages={} responseLength={} toolCalls={} promptTokens={} completionTokens={} totalTokens={}",
-                    resolveModel(response, prompt),
+                    "AUDIT_AI_CALL runId={} model={} durationMs={} promptMessages={} responseLength={} toolCalls={} promptTokens={} completionTokens={} totalTokens={}",
+                    resolveRunId(), resolveModel(response, prompt),
                     durationMs,
                     prompt.getInstructions().size(),
                     responseLength,
@@ -133,8 +133,8 @@ public class AuditedChatModel implements ChatModel {
                     if (signal == SignalType.ON_ERROR) {
                         Throwable error = errorRef.get();
                         log.warn(
-                                "AUDIT_AI_STREAM_ERROR model={} durationMs={} promptMessages={} chunks={} error={}",
-                                resolveModel(null, prompt), durationMs,
+                                "AUDIT_AI_STREAM_ERROR runId={} model={} durationMs={} promptMessages={} chunks={} error={}",
+                                resolveRunId(), resolveModel(null, prompt), durationMs,
                                 prompt.getInstructions().size(), chunks.get(),
                                 error == null ? null : error.getMessage()
                         );
@@ -144,8 +144,8 @@ public class AuditedChatModel implements ChatModel {
                                 error == null ? null : error.getMessage());
                     } else if (signal == SignalType.CANCEL) {
                         // 订阅被取消（dispose/断线）也要留下审计，避免丢事件
-                        log.info("AUDIT_AI_STREAM_CANCELLED model={} durationMs={} promptMessages={} chunks={} responseLength={}",
-                                resolveModel(null, prompt), durationMs,
+                        log.info("AUDIT_AI_STREAM_CANCELLED runId={} model={} durationMs={} promptMessages={} chunks={} responseLength={}",
+                                resolveRunId(), resolveModel(null, prompt), durationMs,
                                 prompt.getInstructions().size(), chunks.get(), contentLength.get());
                         persist("AI_STREAM_CANCELLED", resolveModel(null, prompt), durationMs,
                                 prompt.getInstructions().size(), chunks.get(), contentLength.get(),
@@ -153,8 +153,8 @@ public class AuditedChatModel implements ChatModel {
                                 "cancelled by subscriber");
                     } else if (signal == SignalType.ON_COMPLETE) {
                         log.info(
-                                "AUDIT_AI_STREAM model={} durationMs={} promptMessages={} chunks={} responseLength={} toolCalls={} promptTokens={} completionTokens={} totalTokens={}",
-                                resolveModel(null, prompt),
+                                "AUDIT_AI_STREAM runId={} model={} durationMs={} promptMessages={} chunks={} responseLength={} toolCalls={} promptTokens={} completionTokens={} totalTokens={}",
+                                resolveRunId(), resolveModel(null, prompt),
                                 durationMs,
                                 prompt.getInstructions().size(),
                                 chunks.get(),

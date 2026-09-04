@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -72,6 +73,12 @@ public class AgentSession {
     private static class RunningTask{
         Disposable disposable;
         Sinks.Many<AgentStream> Sink;
+        long runStartNanos;
+        String goal;
+        AtomicInteger eventCount;
+        AtomicInteger toolEventCount;
+        AtomicInteger permissionCount;
+        AtomicBoolean auditLogged;
     }
     private volatile RunningTask runningTask;
 
@@ -99,6 +106,7 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
         AtomicInteger eventCount = new AtomicInteger();
         AtomicInteger toolEventCount = new AtomicInteger();
         AtomicInteger permissionCount = new AtomicInteger();
+        AtomicBoolean auditLogged = new AtomicBoolean();
         runConfig.context().put(SessionConfigKeys.AGENT_CONTEXT, agentContext); // 将 agentContext 丢入 Config 的 Context 中, 方便后续 Hook, Interceptor 和 Tool 的处理
         Sinks.Many<AgentStream> sink;
         Disposable disposable = null;
@@ -149,7 +157,7 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
                                     status = Status.FREE;
                                 }
                             }
-                            logAgentRun(runStartNanos, agentContext.getRunId(), goal, "COMPLETED",
+                            logAgentRunOnce(auditLogged, runStartNanos, agentContext.getRunId(), goal, "COMPLETED",
                                     eventCount.get(), toolEventCount.get(), permissionCount.get(), null);
                             sink.tryEmitComplete();
                         })
@@ -160,7 +168,7 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
                                     status = Status.FREE;
                                 }
                             }
-                            logAgentRun(runStartNanos, agentContext.getRunId(), goal, "ERROR",
+                            logAgentRunOnce(auditLogged, runStartNanos, agentContext.getRunId(), goal, "ERROR",
                                     eventCount.get(), toolEventCount.get(), permissionCount.get(),
                                     error.getMessage());
                             sink.tryEmitError(error);
@@ -177,14 +185,15 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
             } else if (status == Status.RUNNING) {
                 // 若流已同步结束，doOnComplete/doOnError 已把 runningTask 置空、status 置回 FREE/INTERRUPTED，
                 // 不能再放回已完成任务
-                task = new RunningTask(disposable, sink);
+                task = new RunningTask(disposable, sink, runStartNanos, goal,
+                        eventCount, toolEventCount, permissionCount, auditLogged);
                 runningTask = task;
             } else {
                 task = null;
             }
         }
         if (setupError != null) {
-            logAgentRun(runStartNanos, agentContext.getRunId(), goal, "ERROR",
+            logAgentRunOnce(auditLogged, runStartNanos, agentContext.getRunId(), goal, "ERROR",
                     eventCount.get(), toolEventCount.get(), permissionCount.get(), setupError.getMessage());
             sink.tryEmitError(setupError);
             return sink.asFlux();
@@ -210,8 +219,9 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
                                 if (status == Status.RUNNING) {
                                     status = Status.FREE;
                                 }
-                                log.info("AUDIT_AGENT_RUN_CANCELLED runId={} goal={}",
-                                        agentContext.getRunId(), goal);
+                                logAgentRunOnce(task.auditLogged, task.runStartNanos, agentContext.getRunId(),
+                                        task.goal, "CANCELLED", task.eventCount.get(),
+                                        task.toolEventCount.get(), task.permissionCount.get(), "external subscriber cancelled");
                             }
                             runningTask = null;
                         }
@@ -244,6 +254,9 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
 
         // 锁外执行真正的中断/完成通知，避免持锁做耗时或阻塞操作
         task.getDisposable().dispose();
+        logAgentRunOnce(task.auditLogged, task.runStartNanos, agentContext.getRunId(), task.goal,
+                "STOPPED", task.eventCount.get(), task.toolEventCount.get(),
+                task.permissionCount.get(), "stopped by client");
         // 先发 STOPPED 事件再完成 sink：让订阅方（WebSocket handler）知道这是主动停止，
         // 从而抑制多余的 done 终态——否则客户端会在 stopped 之前收到假 done
         task.getSink().tryEmitNext(new AgentStream(AgentStream.Status.STOPPED, agentContext.getRunId()));
@@ -466,6 +479,14 @@ private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
             // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
             shellTool2.getSessionManager().initialize(newConfig);
             return run("", newConfig, Status.INTERRUPTED);
+        }
+    }
+
+    private void logAgentRunOnce(AtomicBoolean logged, long runStartNanos, String runId, String goal,
+                                 String result, int eventCount, int toolEventCount,
+                                 int permissionCount, String error) {
+        if (logged.compareAndSet(false, true)) {
+            logAgentRun(runStartNanos, runId, goal, result, eventCount, toolEventCount, permissionCount, error);
         }
     }
 
