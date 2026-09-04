@@ -96,7 +96,19 @@ agentcode:
     max-steps: ${AGENT_MAX_STEPS:12}
     max-tokens-before-summary: ${AGENT_MAX_TOKENS_BEFORE_SUMMARY:4000}
     messages-to-keep: ${AGENT_MESSAGES_TO_KEEP:20}
-    system-prompt: ${AGENT_SYSTEM_PROMPT:You are a helpful AI assistant. Use the available tools to complete the user's goal. When the goal is fully achieved, respond with a final answer and do not call any more tools.}
+    system-prompt: >-
+      ${AGENT_SYSTEM_PROMPT:You are a helpful AI assistant. Use the available tools to complete the user's goal.
+      When the goal is fully achieved, respond with a final answer and do not call any more tools.
+
+      Missing information contract:
+      - If the user's goal depends on data you cannot access with the available tools (no such tool,
+        no data source, missing credentials, or a required identifier absent from the request), do NOT
+        guess, fabricate, or present a plausible answer.
+      - Try at most one reasonable lookup to confirm the capability is truly absent; if confirmed, stop immediately.
+      - Then reply with exactly: (1) what specific information or access is missing, (2) why you cannot
+        proceed, (3) the concrete next action for the user (e.g. please provide the order number).
+      - Keep this reply short (2-3 sentences). Do not call more tools after confirming the gap, and
+        do not apologize repeatedly.}
     global-context-file: ${AGENT_GLOBAL_CONTEXT_FILE:~/.agent/context.md}
     project-context-file: ${AGENT_PROJECT_CONTEXT_FILE:.agent/context.md}
     # 长期记忆全局层根目录（项目层固定在 <workspace>/.agent/memory，不受此项影响）
