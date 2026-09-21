@@ -2,6 +2,7 @@ package com.agentcode.registry;
 
 import com.agentcode.exception.SessionNotFoundException;
 import com.agentcode.session.AgentSession;
+import com.agentcode.session.SessionStatus;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -61,7 +62,7 @@ public class AgentSessionRegistry {
         sessions.entrySet().removeIf(entry -> {
             SessionEntry value = entry.getValue();
             return value.lastAccessAt < threshold
-                    && value.session.getStatus() == AgentSession.Status.FREE;
+                    && value.session.getStatus().getCurrStatus() == SessionStatus.Status.FREE;
         });
     }
 

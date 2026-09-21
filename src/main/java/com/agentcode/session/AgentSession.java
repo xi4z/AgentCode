@@ -23,6 +23,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.boot.web.servlet.server.Session;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -37,17 +38,15 @@ import java.util.stream.Collectors;
 
 import static com.agentcode.common.ShellParseHelper.extractShellCommand;
 
+/**
+ * AgentSession 运行时的状态
+ */
 @Slf4j
 public class AgentSession {
 
-    public enum Status{
-        FREE, // 当前会话没有在运行
-        RUNNING, // 当前会话正在运行
-        INTERRUPTED // 当前会话被中断, 出现这种状态的原因通常是 Agent 正在等待用户审批
-    }
 
     @Getter
-    private volatile Status status = Status.FREE; // 会话状态
+    private volatile SessionStatus status = new SessionStatus();
 
     private final AgentContext agentContext;
     private final ReactAgent reactAgent;
@@ -78,25 +77,17 @@ public class AgentSession {
             config.context().remove(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY);
             config.metadata().ifPresent(metadata -> metadata.remove(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY));
         }
+
         return run(goal, config);
     }
 
     private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
         Sinks.Many<AgentStream> sink;
-        synchronized (this) {
-            if (status == Status.RUNNING) {
-                // 此时不允许run
-                throw new AgentAlreadyRunningException("会话:" + agentContext.getRunId() + "正在运行");
-            }
-            status = Status.RUNNING;
-            sink = Sinks.many()
-                    .unicast()
-                    .onBackpressureBuffer();
-        }
-        long runStartNanos = System.nanoTime();
-        AtomicInteger eventCount = new AtomicInteger();
-        AtomicInteger toolEventCount = new AtomicInteger();
-        AtomicInteger permissionCount = new AtomicInteger();
+        status.statusChange(SessionStatus.Status.RUNNING); // 切换状态, 已经加锁且重复或无法前往的状态会抛出err
+        sink = Sinks.many()
+                .unicast()
+                .onBackpressureBuffer();
+
         log.info(
                 "AUDIT_AGENT_RUN_START runId={} goal={} workspace={}",
                 agentContext.getRunId(),
@@ -107,49 +98,20 @@ public class AgentSession {
         try {
             // 2. 启动内部 Agent，把事件转发到 sink
             disposable = reactAgent.stream(goal, runConfig).concatMap(this::classifyMessage)
-                    .doOnNext(stream -> {
-                        eventCount.incrementAndGet();
-                        if (stream.status() == AgentStream.Status.TOOL_STREAMING
-                                || stream.status() == AgentStream.Status.TOOL_FINISHED) {
-                            toolEventCount.incrementAndGet();
-                        } else if (stream.status() == AgentStream.Status.PERMISSION_REQUESTED) {
-                            permissionCount.incrementAndGet();
-                        }
-                    })
                     .doOnNext(sink::tryEmitNext)
                     .doOnComplete(() -> {
-                        synchronized (this) {
-                            runningTask = null;
-                            // 审批中断时保留 INTERRUPTED 状态，等待 handleAgentInterrupt 恢复
-                            if (status != Status.INTERRUPTED) {
-                                status = Status.FREE;
-                            }
-                        }
-                        logAgentRun(runStartNanos, agentContext.getRunId(), goal, "COMPLETED",
-                                eventCount.get(), toolEventCount.get(), permissionCount.get(), null);
+                        status.statusChange(SessionStatus.Status.FREE); // 完成时切换成 Free
                         sink.tryEmitComplete();
                     })
                     .doOnError(error -> {
-                        synchronized (this) {
-                            runningTask = null;
-                            if (status != Status.INTERRUPTED) {
-                                status = Status.FREE;
-                            }
-                        }
-                        logAgentRun(runStartNanos, agentContext.getRunId(), goal, "ERROR",
-                                eventCount.get(), toolEventCount.get(), permissionCount.get(),
-                                error.getMessage());
+                        status.statusChange(SessionStatus.Status.FREE); // 失败时也转成 Free
+                        runningTask = null;
                         sink.tryEmitError(error);
                     })
                     .subscribe();
         } catch (GraphRunnerException e) {
-            logAgentRun(runStartNanos, agentContext.getRunId(), goal, "ERROR",
-                    eventCount.get(), toolEventCount.get(), permissionCount.get(), e.getMessage());
             sink.tryEmitError(e);
-            synchronized (this) {
-                runningTask = null;
-                status = Status.FREE;
-            }
+            status.statusChange(SessionStatus.Status.FREE); // 失败时也转成 Free
             return sink.asFlux();
         }
 
@@ -157,7 +119,7 @@ public class AgentSession {
         RunningTask task = new RunningTask(disposable, sink);
         synchronized (this) {
             // 如果流已经同步结束，doOnComplete/doOnError 已把 runningTask 置空，不能再放回已完成任务
-            if (status == Status.RUNNING) {
+            if (status.getCurrStatus() == SessionStatus.Status.RUNNING) {
                 runningTask = task;
             }
         }
@@ -174,45 +136,51 @@ public class AgentSession {
 
     public void stop() {
         RunningTask task;
-        synchronized (this) {
-            if (status == Status.FREE) {
-                throw new StopFailException("会话: " + this.agentContext.getRunId() + "停止失败, 因为当前会话没有在进行中");
-            }
-            task = runningTask;
-            if (task == null) {
-                throw new TaskNotFoundException("当前没有执行任务: " + agentContext.getRunId());
-            }
+        status.statusChange(SessionStatus.Status.FREE);
 
-            // 在锁内先摘引用并置为 FREE，防止重复 stop 或并发 run
-            runningTask = null;
-            status = Status.FREE;
+        task = runningTask;
+        if (task == null) {
+            throw new TaskNotFoundException("当前没有执行任务: " + agentContext.getRunId());
         }
+
+        // 在锁内先摘引用并置为 FREE，防止重复 stop 或并发 run
+        runningTask = null;
 
         // 锁外执行真正的中断/完成通知，避免持锁做耗时或阻塞操作
         task.getDisposable().dispose();
         task.getSink().tryEmitComplete();
     }
 
+    // 插话先不做
     public void interrupt(String message) {
         synchronized (this) {
-            if (status != Status.RUNNING || runningTask == null) {
+            if (status.getCurrStatus() != SessionStatus.Status.RUNNING || runningTask == null) {
                 throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "打断失败, 因为当前会话没有在进行中");
             }
         }
         reactAgent.interrupt(message, config);
     }
 
+    /**
+     * 输入已经完成的审批
+     * @param handles
+     * @return
+     */
     public Flux<AgentStream> handleAgentInterrupt(AgentInterruptHandle[] handles) {
         synchronized (this) {
-            if (status != Status.INTERRUPTED) {
+            if (status.getCurrStatus() != SessionStatus.Status.INTERRUPTED) {
                 throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "恢复中断失败, 因为当前会话没有在被中断");
             }
         }
-        Object raw = config.context().get("__HANDLES_INTERRUPTED__");
+        Object raw = config.context().get(SessionEnum.HANDLES_INTERRUPTED.getCode());
         if (!(raw instanceof InterruptionMetadata.Builder handledInterruption)) {
             throw new IllegalStateException("会话: " + this.agentContext.getRunId() + "没有待处理的审批上下文");
         }
-        Map<String, InterruptionMetadata.ToolFeedback> pendingInterrupted = (Map<String, InterruptionMetadata.ToolFeedback>) config.context().get("__PENDING_INTERRUPTED__");
+
+
+        Map<String, InterruptionMetadata.ToolFeedback> pendingInterrupted = (Map<String, InterruptionMetadata.ToolFeedback>) config.context().get(SessionEnum.PENDING_INTERRUPTED.getCode());
+
+        // 对传过来的每个 interrupt 做处理
         for (AgentInterruptHandle handle : handles) {
             InterruptionMetadata.ToolFeedback original = pendingInterrupted.get(handle.getId());
             String originalArguments = original == null ? handle.getArguments() : original.getArguments();
@@ -241,29 +209,13 @@ public class AgentSession {
                 .threadId(agentContext.getRunId())
                 .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data)
                 .build();
-        config.context().remove("__HANDLES_INTERRUPTED__");
-        config.context().remove("__PENDING_INTERRUPTED");
+        config.context().remove(SessionEnum.HANDLES_INTERRUPTED.getCode());
+        config.context().remove(SessionEnum.PENDING_INTERRUPTED.getCode());
         config = newConfig;
-        config.context().put("__AGENT_CONTEXT__", agentContext);
+        config.context().put(SessionEnum.AGENT_CONTEXT.getCode(), agentContext);
         // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
         shellTool2.getSessionManager().initialize(newConfig);
         return run("");
-    }
-
-    private void logAgentRun(long runStartNanos, String runId, String goal, String result,
-                             int eventCount, int toolEventCount, int permissionCount, String error) {
-        long durationMs = (System.nanoTime() - runStartNanos) / 1_000_000;
-        if (result == null || "ERROR".equals(result)) {
-            log.warn(
-                    "AUDIT_AGENT_RUN runId={} goal={} result={} durationMs={} events={} toolEvents={} permissionRequests={} error={}",
-                    runId, goal, result, durationMs, eventCount, toolEventCount, permissionCount, error
-            );
-        } else {
-            log.info(
-                    "AUDIT_AGENT_RUN runId={} goal={} result={} durationMs={} events={} toolEvents={} permissionRequests={} error={}",
-                    runId, goal, result, durationMs, eventCount, toolEventCount, permissionCount, error
-            );
-        }
     }
 
     private Flux<AgentStream> classifyMessage(NodeOutput nodeOutput) {
@@ -351,7 +303,7 @@ public class AgentSession {
      * 应该使用 WebSocket 向用户发送 WebSocket 信息. 并等待接收
      */
     private Flux<AgentStream> preHandleAgentInterrupt(InterruptionMetadata metadata) {
-        status = Status.INTERRUPTED;
+        status.statusChange(SessionStatus.Status.INTERRUPTED);
         // 先检查工具类型, 如果是 shell 先拆分指令然后走 shell 处理路线
         List<InterruptionMetadata.ToolFeedback> toolFeedbacks = metadata.toolFeedbacks();
         // 已经被处理的 interruption
@@ -390,9 +342,9 @@ public class AgentSession {
                 handledInterruption.addToolFeedback(fb); // 否则就增加到已就绪的 fb 中
             }
         }
-        config.context().put("__HANDLES_INTERRUPTED__", handledInterruption);
+        config.context().put(SessionEnum.HANDLES_INTERRUPTED.getCode(), handledInterruption);
         // 拿到需要处理审批的请求原始数据, 并以 id 做键区分
-        config.context().put("__PENDING_INTERRUPTED__", waitForHandles.stream().collect(Collectors.toMap(InterruptionMetadata.ToolFeedback::getId, Function.identity())));
+        config.context().put(SessionEnum.PENDING_INTERRUPTED.getCode(), waitForHandles.stream().collect(Collectors.toMap(InterruptionMetadata.ToolFeedback::getId, Function.identity())));
 
         // 有需要人工审批的工具时，发送 permission.requested 给前端并中断当前流
         if (!waitForHandles.isEmpty()) {

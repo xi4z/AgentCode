@@ -5,6 +5,7 @@ import com.agentcode.dto.AgentApprovalManager;
 import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.session.AgentSession;
 import com.agentcode.session.AgentSessionRuntime;
+import com.agentcode.session.SessionEnum;
 import com.agentcode.tools.SessionNoteTools;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
@@ -99,7 +100,7 @@ public class AgentSessionFactory {
         RunnableConfig config = RunnableConfig.builder()
                 .threadId(agentContext.getRunId()) // 获取数据
                 .build();
-        config.context().put("__AGENT_CONTEXT__", agentContext);
+        config.context().put(SessionEnum.AGENT_CONTEXT.getCode(), agentContext);
 
         AgentSessionRuntime runtime = AgentSessionRuntime.builder()
                 .reactAgent(reactAgent)

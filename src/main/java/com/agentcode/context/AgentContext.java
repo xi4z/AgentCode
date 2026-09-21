@@ -17,8 +17,13 @@ public class AgentContext {
      * sessionNotes , workspace 由 model 注入
      */
 
+    // 进程ID
     final String runId;
+
+    // 当前想要执行的目标
     String goal;
+
+    // 所属的 workspace
     final String workspace;
 
     @Builder.Default
