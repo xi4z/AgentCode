@@ -6,7 +6,7 @@ import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.session.AgentSession;
 import com.agentcode.session.AgentSessionRuntime;
 import com.agentcode.session.SessionEnum;
-import com.agentcode.tools.SessionNoteTools;
+import com.agentcode.agent.tools.SessionNoteTools;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.hook.Hook;
@@ -92,7 +92,7 @@ public class AgentSessionFactory {
                         FileSystemTools.builder().rootDir(workspace).maxFileSizeMb(10).build(),
                         new SessionNoteTools()
                 )
-                .toolContext(Map.of("__AGENT_CONTEXT__", agentContext))
+                .toolContext(Map.of(SessionEnum.AGENT_CONTEXT.getCode(), agentContext))
                 .hooks(hooks)
                 .build();
 

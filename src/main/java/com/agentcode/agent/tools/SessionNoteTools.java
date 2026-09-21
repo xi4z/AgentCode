@@ -1,4 +1,4 @@
-package com.agentcode.tools;
+package com.agentcode.agent.tools;
 
 import com.agentcode.context.AgentContext;
 import org.springframework.ai.chat.model.ToolContext;
