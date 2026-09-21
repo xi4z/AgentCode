@@ -10,7 +10,6 @@ import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.store.stores.MemoryStore;
 import lombok.RequiredArgsConstructor;
-import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 
@@ -19,17 +18,21 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-@RequiredArgsConstructor
 public class ToolManager {
-    private final ChatModel chatModel;
 
-    /** 长期记忆库（文件式）：memory_search / memory_write / memory_forget 工具需要，透传给 Builder。 */
-    private final MemoryStore memoryStore;
+    private ToolManager() {
+    }
+
+    public static Builder builder(String workspace) {
+        return new Builder(workspace, null);
+    }
 
     @RequiredArgsConstructor
     public static class Builder {
 
         private final String workspace;
+
+        /** 长期记忆库（文件式）：memory_search / memory_write / memory_forget 工具需要，已随 withMemoryTools 一起停用。 */
         private final MemoryStore memoryStore;
         private final Map<String, ToolCallback> toolCallbacks = new LinkedHashMap<>(); // 使用 Linked 是因为保留顺序
 
