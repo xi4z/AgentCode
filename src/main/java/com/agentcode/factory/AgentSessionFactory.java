@@ -1,7 +1,6 @@
 package com.agentcode.factory;
 
 import com.agentcode.agent.manager.HooksManager;
-import com.agentcode.agent.manager.InterceptorManager;
 import com.agentcode.agent.manager.ToolManager;
 import com.agentcode.context.AgentContext;
 import com.agentcode.dto.AgentApprovalManager;
@@ -70,15 +69,13 @@ public class AgentSessionFactory {
                 .tools(tools)
                 .toolContext(Map.of(SessionEnum.AGENT_CONTEXT.getCode(), agentContext))
                 .hooks(hooks)
-                .interceptors(InterceptorManager.builder()
-                        .modelPerformance()
-                        .toolPerformance()
-                        .build())
                 .build();
 
         // 在重新 run 之后, 修改 context 状态
         RunnableConfig config = RunnableConfig.builder()
                 .threadId(agentContext.getRunId()) // 获取数据
+                // metadata 是模型拦截器能从 ModelRequest.getContext() 看到的唯一东西，runId 从这里取
+                .addMetadata(SessionEnum.AGENT_CONTEXT.getCode(), agentContext)
                 .build();
         config.context().put(SessionEnum.AGENT_CONTEXT.getCode(), agentContext);
 

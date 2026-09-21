@@ -15,9 +15,15 @@ import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
+import com.alibaba.cloud.ai.dashscope.spec.DashScopeApiSpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.metadata.EmptyUsage;
+import org.springframework.ai.chat.metadata.Usage;
+import org.springframework.ai.openai.api.OpenAiApi;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -37,6 +43,7 @@ import static com.agentcode.common.ShellParseHelper.extractShellCommand;
  */
 public class AgentSession {
 
+    private static final Logger log = LoggerFactory.getLogger(AgentSession.class);
 
     /**
      * 运行槽：null 表示当前没有 run。
@@ -61,6 +68,9 @@ public class AgentSession {
     private final AgentApprovalManager approvalManager;
 
     private volatile RunnableConfig config;
+
+    /** 最近一次非空的模型用量；每次模型调用收口后清空 */
+    private Usage lastModelUsage;
 
     public AgentSession(AgentContext agentContext, AgentSessionRuntime runtime) {
         this.agentContext = agentContext;
@@ -154,6 +164,8 @@ public class AgentSession {
             return Flux.empty();
         }
         OutputType type = sop.getOutputType();
+        // 模型调用用量随图输出带出来，在这里按"每次调用收口"记账
+        recordModelUsage(type, sop.tokenUsage());
         Message message = sop.message();
         AgentStream agentStream = null;
 
@@ -214,6 +226,48 @@ public class AgentSession {
     }
 
     /**
+     * 模型调用用量统计。
+     *
+     * <p>用量不在请求上（发出前还没有），也不在拦截器的 ModelResponse 上可靠可取（流式下
+     * getChatResponse() 为空），而是随图输出带出来：每个 chunk 的 ChatResponse 用量会被挂到
+     * NodeOutput.tokenUsage()。一次模型调用对应一条 AGENT_MODEL_FINISHED，中间块可能是
+     * null / EmptyUsage，所以缓存最近一次非空值兜底。
+     */
+    private void recordModelUsage(OutputType type, Usage usage) {
+        if (usage != null && !(usage instanceof EmptyUsage)) {
+            this.lastModelUsage = usage;
+        }
+        if (type != OutputType.AGENT_MODEL_FINISHED || lastModelUsage == null) {
+            return;
+        }
+        Usage usageOfThisCall = this.lastModelUsage;
+        this.lastModelUsage = null;
+        log.info("AUDIT_MODEL_USAGE runId={} prompt={} completion={} total={} cached={}",
+                agentContext.getRunId(),
+                usageOfThisCall.getPromptTokens(),
+                usageOfThisCall.getCompletionTokens(),
+                usageOfThisCall.getTotalTokens(),
+                cachedTokens(usageOfThisCall));
+    }
+
+    /**
+     * 缓存命中数只在 provider 的原始用量对象上：DashScope 是 TokenUsage.promptTokenDetailed()，
+     * OpenAI 兼容端点是 Usage.promptTokensDetails()；聚合过的 DefaultUsage 拿不到。
+     */
+    private Integer cachedTokens(Usage usage) {
+        Object nativeUsage = usage.getNativeUsage();
+        if (nativeUsage instanceof DashScopeApiSpec.TokenUsage dashScopeUsage
+                && dashScopeUsage.promptTokenDetailed() != null) {
+            return dashScopeUsage.promptTokenDetailed().cachedTokens();
+        }
+        if (nativeUsage instanceof OpenAiApi.Usage openAiUsage
+                && openAiUsage.promptTokensDetails() != null) {
+            return openAiUsage.promptTokensDetails().cachedTokens();
+        }
+        return null;
+    }
+
+    /**
      * 输入已经完成的审批
      * @param handles
      * @return
@@ -268,6 +322,8 @@ public class AgentSession {
         InterruptionMetadata data = handledInterruption.build();
         RunnableConfig newConfig = RunnableConfig.builder()
                 .threadId(agentContext.getRunId())
+                // 恢复走的是无参 builder：metadata 全新，不补这一行恢复后的模型调用就拿不到 runId
+                .addMetadata(SessionEnum.AGENT_CONTEXT.getCode(), agentContext)
                 .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data)
                 .build();
         config.context().remove(SessionEnum.HANDLED_INTERRUPTED.getCode());
