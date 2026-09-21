@@ -75,7 +75,7 @@ public class AgentSession {
         if (current.get() != null) {
             return SessionStatus.RUNNING;
         }
-        return config.context().containsKey(SessionEnum.HANDLES_INTERRUPTED.getCode())
+        return config.context().containsKey(SessionEnum.HANDLED_INTERRUPTED.getCode())
                 ? SessionStatus.INTERRUPTED
                 : SessionStatus.FREE;
     }
@@ -146,63 +146,9 @@ public class AgentSession {
         }
         reactAgent.interrupt(message, config);
     }
-
-    /**
-     * 输入已经完成的审批
-     * @param handles
-     * @return
-     */
-    public Flux<AgentStream> handleAgentInterrupt(AgentInterruptHandle[] handles) {
-        // 待审批上下文本身就是 INTERRUPTED 的判定依据，不再单独维护状态
-        Object raw = config.context().get(SessionEnum.HANDLES_INTERRUPTED.getCode());
-        if (!(raw instanceof InterruptionMetadata.Builder handledInterruption)) {
-            throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "恢复中断失败, 因为当前会话没有待处理的审批");
-        }
-
-
-        Map<String, InterruptionMetadata.ToolFeedback> pendingInterrupted = (Map<String, InterruptionMetadata.ToolFeedback>) config.context().get(SessionEnum.PENDING_INTERRUPTED.getCode());
-
-        // 对传过来的每个 interrupt 做处理
-        for (AgentInterruptHandle handle : handles) {
-            InterruptionMetadata.ToolFeedback original = pendingInterrupted.get(handle.getId());
-            String originalArguments = original == null ? handle.getArguments() : original.getArguments();
-
-            InterruptionMetadata.ToolFeedback.Builder fbBuilder = InterruptionMetadata.ToolFeedback.builder()
-                    .name(handle.getName())
-                    .id(handle.getId())
-                    .description(handle.getDescription() != null ? handle.getDescription() : (original == null ? null : original.getDescription()))
-                    .arguments(approvalManager.resolveArguments(handle, originalArguments));
-
-            switch (handle.getDecision()) {
-                case APPROVED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
-                case APPROVE_ALL -> {
-                    fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
-                    approvalManager.rememberApproval(handle, originalArguments);
-                }
-                case EDITED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.EDITED);
-                default -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
-            }
-
-            handledInterruption.addToolFeedback(fbBuilder.build());
-        }
-
-        InterruptionMetadata data = handledInterruption.build();
-        RunnableConfig newConfig = RunnableConfig.builder()
-                .threadId(agentContext.getRunId())
-                .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data)
-                .build();
-        config.context().remove(SessionEnum.HANDLES_INTERRUPTED.getCode());
-        config.context().remove(SessionEnum.PENDING_INTERRUPTED.getCode());
-        config = newConfig;
-        config.context().put(SessionEnum.AGENT_CONTEXT.getCode(), agentContext);
-        // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
-        shellTool2.getSessionManager().initialize(newConfig);
-        return run("");
-    }
-
     private Flux<AgentStream> classifyMessage(NodeOutput nodeOutput) {
         if (nodeOutput instanceof InterruptionMetadata metadata) {
-            return preHandleAgentInterrupt(metadata);
+            return preHandleToolApproval(metadata);
         }
         if (!(nodeOutput instanceof StreamingOutput sop)) {
             return Flux.empty();
@@ -268,6 +214,73 @@ public class AgentSession {
     }
 
     /**
+     * 输入已经完成的审批
+     * @param handles
+     * @return
+     */
+    public Flux<AgentStream> handleToolApproval(AgentInterruptHandle[] handles) {
+        // 待审批上下文本身就是 INTERRUPTED 的判定依据，不再单独维护状态
+        Object raw = config.context().get(SessionEnum.HANDLED_INTERRUPTED.getCode());
+        if (!(raw instanceof InterruptionMetadata.Builder handledInterruption)) {
+            throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "恢复中断失败, 因为当前会话没有待处理的审批");
+        }
+
+        Map<String, InterruptionMetadata.ToolFeedback> pendingInterrupted = (Map<String, InterruptionMetadata.ToolFeedback>) config.context().get(SessionEnum.PENDING_INTERRUPTED.getCode());
+
+        // 对传过来的每个 interrupt 做处理
+        for (AgentInterruptHandle handle : handles) {
+            // 拿到对应的处理
+            InterruptionMetadata.ToolFeedback original = pendingInterrupted.get(handle.getId());
+            if (original == null) {
+                continue; // 如果待审批的工具中没有发来的, 就直接跳过
+            }
+            String originalArguments = original.getArguments();
+
+            InterruptionMetadata.ToolFeedback.Builder fbBuilder = InterruptionMetadata.ToolFeedback.builder()
+                    .name(handle.getName())
+                    .id(handle.getId())
+                    .description(handle.getDescription() != null ? handle.getDescription() : original.getDescription())
+                    .arguments(approvalManager.resolveArguments(handle, originalArguments));
+
+            switch (handle.getDecision()) {
+                case APPROVED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
+                case APPROVE_ALL -> {
+                    fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
+                    approvalManager.rememberApproval(handle, originalArguments);
+                }
+                case EDITED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.EDITED);
+                default -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
+            }
+
+            handledInterruption.addToolFeedback(fbBuilder.build());
+            // 没什么问题就移除 pending
+            pendingInterrupted.remove(handle.getId());
+        }
+
+        // 如果没有移除干净, 就打回重新写
+        if (!pendingInterrupted.isEmpty()) {
+            return Flux.just(new AgentStream(
+                    AgentStream.Status.PERMISSION_REQUESTED,
+                    approvalManager.toPermissionJson(pendingInterrupted.values().stream().toList())
+            ));
+        }
+
+        InterruptionMetadata data = handledInterruption.build();
+        RunnableConfig newConfig = RunnableConfig.builder()
+                .threadId(agentContext.getRunId())
+                .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data)
+                .build();
+        config.context().remove(SessionEnum.HANDLED_INTERRUPTED.getCode());
+        config.context().remove(SessionEnum.PENDING_INTERRUPTED.getCode());
+        config = newConfig;
+        config.context().put(SessionEnum.AGENT_CONTEXT.getCode(), agentContext);
+        // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
+        shellTool2.getSessionManager().initialize(newConfig);
+        return run("");
+    }
+
+
+    /**
      * 用于预处理需要 HumanInLoop 环节的信息
      * shell write 工具 默认需要 interrupt.
      * 但是用户可能期望他们已经批准过的指令不要再次打扰他们, 于是可能会设置使用通配符来统一过滤已经过滤过的指令
@@ -284,19 +297,20 @@ public class AgentSession {
      * 5. 工具的默认策略, 当然工具也有缓存
      * 应该使用 WebSocket 向用户发送 WebSocket 信息. 并等待接收
      */
-    private Flux<AgentStream> preHandleAgentInterrupt(InterruptionMetadata metadata) {
+    private Flux<AgentStream> preHandleToolApproval(InterruptionMetadata metadata) {
         // 先检查工具类型, 如果是 shell 先拆分指令然后走 shell 处理路线
         List<InterruptionMetadata.ToolFeedback> toolFeedbacks = metadata.toolFeedbacks();
         // 已经被处理的 interruption
         InterruptionMetadata.Builder handledInterruption = InterruptionMetadata.builder()
                 .nodeId(metadata.node())
                 .state(metadata.state());
+
+
         List<InterruptionMetadata.ToolFeedback> waitForHandles = new ArrayList<>();
         for (InterruptionMetadata.ToolFeedback feedback : toolFeedbacks) {
             // 当前只拦截 write_file, edit 与 shell
             InterruptionMetadata.ToolFeedback.Builder currFeedback =
                     InterruptionMetadata.ToolFeedback.builder(feedback); // 先预处理
-
             if (!feedback.getName().equalsIgnoreCase("shell")){
                 // 此时检查工作目录即可
                 if (approvalManager.checkPathValid(feedback.getArguments())) {
@@ -323,7 +337,7 @@ public class AgentSession {
                 handledInterruption.addToolFeedback(fb); // 否则就增加到已就绪的 fb 中
             }
         }
-        config.context().put(SessionEnum.HANDLES_INTERRUPTED.getCode(), handledInterruption);
+        config.context().put(SessionEnum.HANDLED_INTERRUPTED.getCode(), handledInterruption);
         // 拿到需要处理审批的请求原始数据, 并以 id 做键区分
         config.context().put(SessionEnum.PENDING_INTERRUPTED.getCode(), waitForHandles.stream().collect(Collectors.toMap(InterruptionMetadata.ToolFeedback::getId, Function.identity())));
 
@@ -345,7 +359,7 @@ public class AgentSession {
                             if (holder != null) {
                                 current.compareAndSet(holder, null);
                             }
-                            return handleAgentInterrupt(new AgentInterruptHandle[0]);
+                            return handleToolApproval(new AgentInterruptHandle[0]);
                         })
         );
     }

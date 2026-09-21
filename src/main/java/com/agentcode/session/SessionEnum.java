@@ -4,7 +4,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 public enum SessionEnum {
-    HANDLES_INTERRUPTED("__HANDLES_INTERRUPTED__", "已处理的审批"),
+    HANDLED_INTERRUPTED("__HANDLES_INTERRUPTED__", "已处理的审批"),
     AGENT_CONTEXT("__AGENT_CONTEXT__", "已处理的审批"),
     PENDING_INTERRUPTED("__PENDING_INTERRUPTED__", "待处理的审批");
 

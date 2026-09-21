@@ -62,7 +62,7 @@ class AgentSessionApprovalAllTest {
                     AgentInterruptHandle.Decision.APPROVE_ALL,
                     null
             );
-            List<AgentStream> resumed = session.handleAgentInterrupt(new AgentInterruptHandle[]{handle})
+            List<AgentStream> resumed = session.handleToolApproval(new AgentInterruptHandle[]{handle})
                     .collectList().block(Duration.ofSeconds(15));
             assertThat(resumed).isNotNull();
             assertThat(resumed)

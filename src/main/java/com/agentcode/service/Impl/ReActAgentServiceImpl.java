@@ -52,7 +52,7 @@ public class ReActAgentServiceImpl implements ReactAgentService {
     @Override
     public Flux<AgentStream> handleInterrupt(AgentInterruptHandle handle) {
         return agentSessionRegistry.get(handle.getRunId())
-                .handleAgentInterrupt(new AgentInterruptHandle[]{handle});
+                .handleToolApproval(new AgentInterruptHandle[]{handle});
     }
 
     @Override
