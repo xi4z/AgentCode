@@ -4,8 +4,10 @@ import com.alibaba.cloud.ai.graph.agent.interceptor.ToolCallHandler;
 import com.alibaba.cloud.ai.graph.agent.interceptor.ToolCallRequest;
 import com.alibaba.cloud.ai.graph.agent.interceptor.ToolCallResponse;
 import com.alibaba.cloud.ai.graph.agent.interceptor.ToolInterceptor;
+import lombok.extern.slf4j.Slf4j;
 
 // 工具调用性能监控
+@Slf4j
 public class ToolPerformanceInterceptor extends ToolInterceptor {
 
     @Override
@@ -18,18 +20,18 @@ public class ToolPerformanceInterceptor extends ToolInterceptor {
         String toolName = request.getToolName();
         long startTime = System.currentTimeMillis();
 
-        System.out.println("执行工具: " + toolName);
+        log.info("执行工具: {}", toolName);
 
         try {
             ToolCallResponse response = handler.call(request);
 
             long duration = System.currentTimeMillis() - startTime;
-            System.out.println("工具 " + toolName + " 执行成功 (耗时: " + duration + "ms)");
+            log.info("工具 {} 执行成功 (耗时: {}ms)", toolName, duration);
 
             return response;
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - startTime;
-            System.err.println("工具 " + toolName + " 执行失败 (耗时: " + duration + "ms): " + e.getMessage());
+            log.info("工具 {} 执行失败 (耗时: {}ms): {}", toolName, duration, e.getMessage());
 
             return ToolCallResponse.of(
                     request.getToolCallId(),
