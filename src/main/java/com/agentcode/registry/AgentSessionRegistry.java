@@ -62,7 +62,7 @@ public class AgentSessionRegistry {
         sessions.entrySet().removeIf(entry -> {
             SessionEntry value = entry.getValue();
             return value.lastAccessAt < threshold
-                    && value.session.getStatus().getCurrStatus() == SessionStatus.Status.FREE;
+                    && value.session.status() == SessionStatus.FREE;
         });
     }
 

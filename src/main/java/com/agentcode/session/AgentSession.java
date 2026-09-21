@@ -7,7 +7,6 @@ import com.agentcode.dto.AgentStream;
 import com.agentcode.exception.AgentAlreadyRunningException;
 import com.agentcode.exception.InterruptFailException;
 import com.agentcode.exception.StopFailException;
-import com.agentcode.exception.TaskNotFoundException;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.action.InterruptionMetadata;
@@ -16,14 +15,9 @@ import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.boot.web.servlet.server.Session;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -32,7 +26,7 @@ import reactor.core.publisher.Sinks;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -41,12 +35,25 @@ import static com.agentcode.common.ShellParseHelper.extractShellCommand;
 /**
  * AgentSession 运行时的状态
  */
-@Slf4j
 public class AgentSession {
 
 
-    @Getter
-    private volatile SessionStatus status = new SessionStatus();
+    /**
+     * 运行槽：null 表示当前没有 run。
+     * "有没有在跑"和"跑的是谁"合并成同一个原子引用，所以不需要额外加锁，
+     * 也不会出现 status 与 runningTask 各说各话的情况。
+     */
+    private final AtomicReference<Run> current = new AtomicReference<>();
+
+    /** 一次 run 的句柄：事件出口 + 图的上游订阅 */
+    private static final class Run {
+        private final Sinks.Many<AgentStream> sink;
+        private volatile Disposable upstream;
+
+        private Run(Sinks.Many<AgentStream> sink) {
+            this.sink = sink;
+        }
+    }
 
     private final AgentContext agentContext;
     private final ReactAgent reactAgent;
@@ -55,20 +62,22 @@ public class AgentSession {
 
     private volatile RunnableConfig config;
 
-    @AllArgsConstructor
-    @Data
-    private static class RunningTask{
-        Disposable disposable;
-        Sinks.Many<AgentStream> Sink;
-    }
-    private volatile RunningTask runningTask;
-
     public AgentSession(AgentContext agentContext, AgentSessionRuntime runtime) {
         this.agentContext = agentContext;
         this.reactAgent = runtime.getReactAgent();
         this.shellTool2 = runtime.getShellTool2();
         this.approvalManager = runtime.getApprovalManager();
         this.config = runtime.getInitialConfig();
+    }
+
+    /** 会话运行态：从运行槽与待审批上下文推导，不单独维护 */
+    public SessionStatus status() {
+        if (current.get() != null) {
+            return SessionStatus.RUNNING;
+        }
+        return config.context().containsKey(SessionEnum.HANDLES_INTERRUPTED.getCode())
+                ? SessionStatus.INTERRUPTED
+                : SessionStatus.FREE;
     }
 
     public Flux<AgentStream> run(String goal){
@@ -82,81 +91,58 @@ public class AgentSession {
     }
 
     private Flux<AgentStream> run(String goal, RunnableConfig runConfig){
-        Sinks.Many<AgentStream> sink;
-        status.statusChange(SessionStatus.Status.RUNNING); // 切换状态, 已经加锁且重复或无法前往的状态会抛出err
-        sink = Sinks.many()
+        Sinks.Many<AgentStream> sink = Sinks.many()
                 .unicast()
                 .onBackpressureBuffer();
+        Run run = new Run(sink);
+        // 占位成功才真正开跑：同一个会话同一时刻只允许一个 run，重复 run 直接被拒
+        if (!current.compareAndSet(null, run)) {
+            throw new AgentAlreadyRunningException("会话:" + agentContext.getRunId() + "正在运行");
+        }
 
-        log.info(
-                "AUDIT_AGENT_RUN_START runId={} goal={} workspace={}",
-                agentContext.getRunId(),
-                goal,
-                agentContext.getWorkspace()
-        );
-        Disposable disposable;
         try {
             // 2. 启动内部 Agent，把事件转发到 sink
-            disposable = reactAgent.stream(goal, runConfig).concatMap(this::classifyMessage)
+            run.upstream = reactAgent.stream(goal, runConfig).concatMap(this::classifyMessage)
                     .doOnNext(sink::tryEmitNext)
                     .doOnComplete(() -> {
-                        status.statusChange(SessionStatus.Status.FREE); // 完成时切换成 Free
+                        // 只释放自己占的槽：本轮若已把槽让给恢复流，这里不能误清
+                        current.compareAndSet(run, null);
                         sink.tryEmitComplete();
                     })
                     .doOnError(error -> {
-                        status.statusChange(SessionStatus.Status.FREE); // 失败时也转成 Free
-                        runningTask = null;
+                        current.compareAndSet(run, null);
                         sink.tryEmitError(error);
                     })
                     .subscribe();
         } catch (GraphRunnerException e) {
+            current.compareAndSet(run, null);
             sink.tryEmitError(e);
-            status.statusChange(SessionStatus.Status.FREE); // 失败时也转成 Free
             return sink.asFlux();
         }
 
-        // 3. 保存 disposable + sink，供 stop() 使用
-        RunningTask task = new RunningTask(disposable, sink);
-        synchronized (this) {
-            // 如果流已经同步结束，doOnComplete/doOnError 已把 runningTask 置空，不能再放回已完成任务
-            if (status.getCurrStatus() == SessionStatus.Status.RUNNING) {
-                runningTask = task;
-            }
-        }
-        return sink.asFlux()
-                .doFinally(signal -> {
-                    synchronized (this) {
-                        // 只清理当前这次 run 的任务，避免旧流结束时误清新会话的任务
-                        if (runningTask == task) {
-                            runningTask = null;
-                        }
-                    }
-                });
+        // 3. sink 由本轮持有；终止信号由 doOnComplete/doOnError 或 stop() 负责发出。
+        //    下游取消（如客户端断开）不释放运行槽，避免旧图还在跑时放进第二个 run。
+        return sink.asFlux();
     }
 
     public void stop() {
-        RunningTask task;
-        status.statusChange(SessionStatus.Status.FREE);
-
-        task = runningTask;
-        if (task == null) {
-            throw new TaskNotFoundException("当前没有执行任务: " + agentContext.getRunId());
+        // 原子摘走运行槽：摘不到就是没在跑；摘到了本次 stop 就是唯一的"停"操作，
+        // 不会与并发的 run()/doOnComplete() 抢同一份状态
+        Run run = current.getAndSet(null);
+        if (run == null) {
+            throw new StopFailException("会话: " + agentContext.getRunId() + "停止失败, 因为当前会话没有在进行中");
         }
-
-        // 在锁内先摘引用并置为 FREE，防止重复 stop 或并发 run
-        runningTask = null;
-
-        // 锁外执行真正的中断/完成通知，避免持锁做耗时或阻塞操作
-        task.getDisposable().dispose();
-        task.getSink().tryEmitComplete();
+        Disposable upstream = run.upstream;
+        if (upstream != null) {
+            upstream.dispose();
+        }
+        run.sink.tryEmitComplete();
     }
 
     // 插话先不做
     public void interrupt(String message) {
-        synchronized (this) {
-            if (status.getCurrStatus() != SessionStatus.Status.RUNNING || runningTask == null) {
-                throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "打断失败, 因为当前会话没有在进行中");
-            }
+        if (current.get() == null) {
+            throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "打断失败, 因为当前会话没有在进行中");
         }
         reactAgent.interrupt(message, config);
     }
@@ -167,14 +153,10 @@ public class AgentSession {
      * @return
      */
     public Flux<AgentStream> handleAgentInterrupt(AgentInterruptHandle[] handles) {
-        synchronized (this) {
-            if (status.getCurrStatus() != SessionStatus.Status.INTERRUPTED) {
-                throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "恢复中断失败, 因为当前会话没有在被中断");
-            }
-        }
+        // 待审批上下文本身就是 INTERRUPTED 的判定依据，不再单独维护状态
         Object raw = config.context().get(SessionEnum.HANDLES_INTERRUPTED.getCode());
         if (!(raw instanceof InterruptionMetadata.Builder handledInterruption)) {
-            throw new IllegalStateException("会话: " + this.agentContext.getRunId() + "没有待处理的审批上下文");
+            throw new InterruptFailException("会话: " + this.agentContext.getRunId() + "恢复中断失败, 因为当前会话没有待处理的审批");
         }
 
 
@@ -303,7 +285,6 @@ public class AgentSession {
      * 应该使用 WebSocket 向用户发送 WebSocket 信息. 并等待接收
      */
     private Flux<AgentStream> preHandleAgentInterrupt(InterruptionMetadata metadata) {
-        status.statusChange(SessionStatus.Status.INTERRUPTED);
         // 先检查工具类型, 如果是 shell 先拆分指令然后走 shell 处理路线
         List<InterruptionMetadata.ToolFeedback> toolFeedbacks = metadata.toolFeedbacks();
         // 已经被处理的 interruption
@@ -354,11 +335,18 @@ public class AgentSession {
             ));
         }
 
-        // 全部自动放行（安全命令/会话缓存命中）：不打扰用户，直接恢复执行
-        // 延迟到当前流完成后再启动恢复流，避免在 concatMap 处理中重入 run()
+        // 全部自动放行（安全命令/会话缓存命中）：不打扰用户，直接恢复执行。
+        // 本轮图已经停在中断点上、不会再往前走，所以先把运行槽让给恢复流，它才是接下来真正在跑的那个；
+        // 延迟 1ms 是为了避免在 concatMap 处理中重入 run()
+        Run holder = current.get();
         return Flux.defer(() ->
                 Mono.delay(java.time.Duration.ofMillis(1))
-                        .flatMapMany(ignore -> handleAgentInterrupt(new AgentInterruptHandle[0]))
+                        .flatMapMany(ignore -> {
+                            if (holder != null) {
+                                current.compareAndSet(holder, null);
+                            }
+                            return handleAgentInterrupt(new AgentInterruptHandle[0]);
+                        })
         );
     }
 }
