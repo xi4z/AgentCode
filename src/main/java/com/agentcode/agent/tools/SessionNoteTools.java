@@ -1,6 +1,6 @@
 package com.agentcode.agent.tools;
 
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.context.AgentContext;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;

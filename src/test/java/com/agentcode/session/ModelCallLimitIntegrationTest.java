@@ -1,6 +1,6 @@
 package com.agentcode.session;
 
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.context.AgentContext;
 import com.agentcode.dto.AgentStream;
 import com.agentcode.factory.AgentSessionFactory;
 import com.agentcode.factory.SessionBuildOptions;

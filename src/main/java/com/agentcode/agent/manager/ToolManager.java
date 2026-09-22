@@ -1,19 +1,16 @@
 package com.agentcode.agent.manager;
 
 import com.agentcode.agent.tools.SessionNoteTools;
-import com.agentcode.context.AgentContext;
 import com.alibaba.cloud.ai.graph.agent.AgentTool;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemTools;
 import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
-import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.store.stores.MemoryStore;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;

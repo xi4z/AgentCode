@@ -1,9 +1,7 @@
 package com.agentcode.agent.interceptor;
 
-import com.alibaba.cloud.ai.graph.agent.interceptor.ToolCallHandler;
-import com.alibaba.cloud.ai.graph.agent.interceptor.ToolCallRequest;
-import com.alibaba.cloud.ai.graph.agent.interceptor.ToolCallResponse;
-import com.alibaba.cloud.ai.graph.agent.interceptor.ToolInterceptor;
+import com.agentcode.agent.AgentTrace;
+import com.alibaba.cloud.ai.graph.agent.interceptor.*;
 import lombok.extern.slf4j.Slf4j;
 
 // 工具调用性能监控
@@ -18,21 +16,23 @@ public class ToolPerformanceInterceptor extends ToolInterceptor {
     @Override
     public ToolCallResponse interceptToolCall(ToolCallRequest request, ToolCallHandler handler) {
         String toolName = request.getToolName();
+        String toolArgs = request.getArguments();
         long startTime = System.currentTimeMillis();
 
-        log.info("执行工具: {}", toolName);
-
+        String runId = request.getExecutionContext()
+                .flatMap(ToolCallExecutionContext::threadId)
+                .orElse(null);
+        AgentTrace.toolExecution(runId, toolName, toolArgs);
         try {
             ToolCallResponse response = handler.call(request);
-
+            String res = response.getResult();
             long duration = System.currentTimeMillis() - startTime;
-            log.info("工具 {} 执行成功 (耗时: {}ms)", toolName, duration);
+            AgentTrace.toolSuccess(runId, toolName, toolArgs, res, String.valueOf(duration));
 
             return response;
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - startTime;
-            log.info("工具 {} 执行失败 (耗时: {}ms): {}", toolName, duration, e.getMessage());
-
+            AgentTrace.toolFailure(runId, toolName, toolArgs, e.getMessage(), String.valueOf(duration));
             return ToolCallResponse.of(
                     request.getToolCallId(),
                     request.getToolName(),

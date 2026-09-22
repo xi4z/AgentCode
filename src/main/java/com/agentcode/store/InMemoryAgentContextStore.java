@@ -1,6 +1,6 @@
 package com.agentcode.store;
 
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.context.AgentContext;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;

@@ -1,6 +1,6 @@
 package com.agentcode.session;
 
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.context.AgentContext;
 import com.agentcode.dto.AgentApprovalManager;
 import com.agentcode.dto.AgentInterruptHandle;
 import com.agentcode.dto.AgentStream;
@@ -156,6 +156,7 @@ public class AgentSession {
         }
         reactAgent.interrupt(message, config);
     }
+
     private Flux<AgentStream> classifyMessage(NodeOutput nodeOutput) {
         if (nodeOutput instanceof InterruptionMetadata metadata) {
             return preHandleToolApproval(metadata);

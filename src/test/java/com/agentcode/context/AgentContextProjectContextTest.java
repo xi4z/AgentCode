@@ -1,5 +1,6 @@
 package com.agentcode.context;
 
+import com.agentcode.agent.context.AgentContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 

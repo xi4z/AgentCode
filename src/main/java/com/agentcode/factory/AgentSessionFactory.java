@@ -1,8 +1,9 @@
 package com.agentcode.factory;
 
 import com.agentcode.agent.manager.HooksManager;
+import com.agentcode.agent.manager.InterceptorManager;
 import com.agentcode.agent.manager.ToolManager;
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.context.AgentContext;
 import com.agentcode.dto.AgentApprovalManager;
 import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.session.AgentSession;
@@ -11,6 +12,7 @@ import com.agentcode.session.SessionEnum;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.hook.Hook;
+import com.alibaba.cloud.ai.graph.agent.interceptor.Interceptor;
 import com.alibaba.cloud.ai.graph.agent.tools.ShellTool2;
 import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
 import lombok.RequiredArgsConstructor;
@@ -60,6 +62,7 @@ public class AgentSessionFactory {
                 .build();
 
         List<ToolCallback> tools = ToolManager.builder(workspace).mainAgent().build();
+        List<Interceptor> interceptors = InterceptorManager.builder().toolPerformance().build();
 
         ReactAgent reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
@@ -67,6 +70,7 @@ public class AgentSessionFactory {
                 .systemPrompt(agentContext.systemPrompt(systemPrompt))
                 .saver(saver)
                 .tools(tools)
+                .interceptors(interceptors)
                 .toolContext(Map.of(SessionEnum.AGENT_CONTEXT.getCode(), agentContext))
                 .hooks(hooks)
                 .build();

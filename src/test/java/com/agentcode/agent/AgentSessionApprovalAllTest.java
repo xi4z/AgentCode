@@ -1,6 +1,6 @@
 package com.agentcode.agent;
 
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.context.AgentContext;
 import com.agentcode.dto.AgentInterruptHandle;
 import com.agentcode.dto.AgentStream;
 import com.agentcode.factory.AgentSessionFactory;

@@ -2,7 +2,7 @@ package com.agentcode.websocket;
 
 import com.agentcode.dto.AgentInterruptHandle;
 import com.agentcode.dto.AgentStream;
-import com.agentcode.context.AgentContext;
+import com.agentcode.agent.context.AgentContext;
 import com.agentcode.service.ReactAgentService;
 import com.agentcode.store.InMemoryAgentContextStore;
 import com.agentcode.websocket.ChatProtocol.ClientMessage;

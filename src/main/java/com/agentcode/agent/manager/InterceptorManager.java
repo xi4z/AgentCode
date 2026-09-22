@@ -1,6 +1,5 @@
 package com.agentcode.agent.manager;
 
-import com.agentcode.agent.interceptor.ModelPerformanceInterceptor;
 import com.agentcode.agent.interceptor.ToolPerformanceInterceptor;
 import com.alibaba.cloud.ai.graph.agent.interceptor.Interceptor;
 
@@ -26,11 +25,6 @@ public class InterceptorManager {
 
         private final List<Interceptor> interceptors = new ArrayList<>();
 
-        /** 模型调用耗时与异常 */
-        public Builder modelPerformance() {
-            interceptors.add(new ModelPerformanceInterceptor());
-            return this;
-        }
 
         /** 工具调用耗时与异常 */
         public Builder toolPerformance() {
