@@ -1,5 +1,6 @@
 package com.agentcode.session;
 
+import com.agentcode.agent.AgentTrace;
 import com.agentcode.agent.context.AgentContext;
 import com.agentcode.dto.AgentApprovalManager;
 import com.agentcode.dto.AgentInterruptHandle;
@@ -16,8 +17,6 @@ import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import com.alibaba.cloud.ai.dashscope.spec.DashScopeApiSpec;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -30,6 +29,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -42,8 +42,6 @@ import static com.agentcode.common.ShellParseHelper.extractShellCommand;
  * AgentSession 运行时的状态
  */
 public class AgentSession {
-
-    private static final Logger log = LoggerFactory.getLogger(AgentSession.class);
 
     /**
      * 运行槽：null 表示当前没有 run。
@@ -243,29 +241,38 @@ public class AgentSession {
         }
         Usage usageOfThisCall = this.lastModelUsage;
         this.lastModelUsage = null;
-        log.info("AUDIT_MODEL_USAGE runId={} prompt={} completion={} total={} cached={}",
-                agentContext.getRunId(),
-                usageOfThisCall.getPromptTokens(),
-                usageOfThisCall.getCompletionTokens(),
-                usageOfThisCall.getTotalTokens(),
-                cachedTokens(usageOfThisCall));
+        // 累计量跟其它账目一样落在 config.context() 上，AgentTrace 只负责打日志
+        long totalUsage = usageTotal() + tokenOf(usageOfThisCall.getPromptTokens())
+                + tokenOf(usageOfThisCall.getCompletionTokens());
+        config.context().put(SessionEnum.TOTAL_USAGE.getCode(), totalUsage);
+        AgentTrace.modelUsage(agentContext.getRunId(), usageOfThisCall,
+                AgentTrace.cachedTokens(usageOfThisCall), totalUsage);
     }
 
+    private long usageTotal() {
+        Object value = config.context().get(SessionEnum.TOTAL_USAGE.getCode());
+        return value instanceof Number number ? number.longValue() : 0L;
+    }
+
+    private static long tokenOf(Integer tokens) {
+        return tokens == null ? 0L : tokens;
+    }
+
+
+
     /**
-     * 缓存命中数只在 provider 的原始用量对象上：DashScope 是 TokenUsage.promptTokenDetailed()，
-     * OpenAI 兼容端点是 Usage.promptTokensDetails()；聚合过的 DefaultUsage 拿不到。
+     * 把 {@code config.context()} 上的累计量取出来，用于种进重建后的 config。
+     * 只搬"总量"三个键，不含单次计时与审批态。
      */
-    private Integer cachedTokens(Usage usage) {
-        Object nativeUsage = usage.getNativeUsage();
-        if (nativeUsage instanceof DashScopeApiSpec.TokenUsage dashScopeUsage
-                && dashScopeUsage.promptTokenDetailed() != null) {
-            return dashScopeUsage.promptTokenDetailed().cachedTokens();
+    private Map<String, Object> carryTotals() {
+        Map<String, Object> carried = new HashMap<>();
+        for (SessionEnum key : List.of(SessionEnum.TOTAL_COUNT, SessionEnum.TOTAL_DURATION, SessionEnum.TOTAL_USAGE)) {
+            Object value = config.context().get(key.getCode());
+            if (value != null) {
+                carried.put(key.getCode(), value);
+            }
         }
-        if (nativeUsage instanceof OpenAiApi.Usage openAiUsage
-                && openAiUsage.promptTokensDetails() != null) {
-            return openAiUsage.promptTokensDetails().cachedTokens();
-        }
-        return null;
+        return carried;
     }
 
     /**
@@ -321,9 +328,12 @@ public class AgentSession {
         }
 
         InterruptionMetadata data = handledInterruption.build();
+        // 恢复走的是无参 builder，context 是一张全新的表：累计量先取出来，建完再种回去，
+        // 否则跨审批的"总量"会跟着旧表一起丢掉（只搬累计量，审批态故意不带过去）
+        Map<String, Object> carriedTotals = carryTotals();
         RunnableConfig newConfig = RunnableConfig.builder()
                 .threadId(agentContext.getRunId())
-                // 恢复走的是无参 builder：metadata 全新，不补这一行恢复后的模型调用就拿不到 runId
+                // metadata 全新，不补这一行恢复后的模型调用就拿不到 runId
                 .addMetadata(SessionEnum.AGENT_CONTEXT.getCode(), agentContext)
                 .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data)
                 .build();
@@ -331,6 +341,7 @@ public class AgentSession {
         config.context().remove(SessionEnum.PENDING_INTERRUPTED.getCode());
         config = newConfig;
         config.context().put(SessionEnum.AGENT_CONTEXT.getCode(), agentContext);
+        config.context().putAll(carriedTotals);
         // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
         shellTool2.getSessionManager().initialize(newConfig);
         return run("");

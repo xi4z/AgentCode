@@ -25,7 +25,6 @@ public class InterceptorManager {
 
         private final List<Interceptor> interceptors = new ArrayList<>();
 
-
         /** 工具调用耗时与异常 */
         public Builder toolPerformance() {
             interceptors.add(new ToolPerformanceInterceptor());

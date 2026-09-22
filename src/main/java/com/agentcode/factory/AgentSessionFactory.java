@@ -54,6 +54,7 @@ public class AgentSessionFactory {
         ShellTool2 shellTool2 = ShellTool2.builder(workspace).build();
 
         List<Hook> hooks = HooksManager.builder(chatModel, workspace)
+                .performance() // 模型调用与轮次审计日志
                 .shell(shellTool2) // shell Hooks, 在审批前后防止 Shell 会话中断
                 .summarization() // Token 成本控制
                 .callLimit() // 调用控制

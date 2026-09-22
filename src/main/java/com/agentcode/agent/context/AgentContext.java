@@ -26,6 +26,12 @@ public class AgentContext {
     // 所属的 workspace
     final String workspace;
 
+    /** 会话笔记：由 SessionNoteTools 写入，systemPrompt 读取；后续按 TODO 改为独立存储 */
+    @Builder.Default
+    StringBuilder sessionNotes = new StringBuilder();
+
+
+
 
     public String systemPrompt(String systemPrompt) {
         StringBuilder sb = new StringBuilder(systemPrompt == null ? "" : systemPrompt);
@@ -33,8 +39,7 @@ public class AgentContext {
         if (projectContext != null && !projectContext.isBlank()) {
             sb.append("\n\n## Project Context\n").append(projectContext);
         }
-        //TODO 这里需要修改成SessionNotes
-        String sessionNotes = parseProjectContext(workspace);
+        //TODO 会话笔记后续应改为独立存储/持久化，不再随 AgentContext 生命周期
         if (sessionNotes != null && !sessionNotes.isEmpty()) {
             sb.append("\n\n## Session Notes\n").append(sessionNotes);
         }

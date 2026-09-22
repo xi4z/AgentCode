@@ -10,49 +10,47 @@ import lombok.NoArgsConstructor;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
+/**
+ * 每次模型调用的计时与计数。
+ *
+ * <p>账记在 {@code RunnableConfig.context()} 上（key 见 {@link SessionEnum}），跟着 run 走；
+ * {@link AgentTrace} 只管按统一格式打日志。
+ * token 用量不在这里：{@code _TOKEN_USAGE_} 被 GraphRunnerContext 截成私有字段、不进 state，
+ * 用量由会话层从 {@code NodeOutput.tokenUsage()} 侧补记。
+ */
 @NoArgsConstructor
 public class ModelPerformanceHook extends ModelHook {
-    // 在每次模型调用前后执行
+
     @Override
     public String getName() {
-        return "";
+        return "model_performance";
     }
 
     @Override
     public CompletableFuture<Map<String, Object>> beforeModel(OverAllState state, RunnableConfig config) {
-        // 记录时间
         config.context().put(SessionEnum.SINGLE_TIME.getCode(), System.currentTimeMillis());
-        // 记录调用次数
-        if (config.threadId().isPresent()){
-            AgentTrace.modelCallStart(config.threadId().get());
-        }
         return super.beforeModel(state, config);
     }
 
     @Override
     public CompletableFuture<Map<String, Object>> afterModel(OverAllState state, RunnableConfig config) {
-
-        // 计数
-        int count = config.context().containsKey(SessionEnum.TOTAL_COUNT.getCode()) ? (int) config.context().get(SessionEnum.TOTAL_COUNT.getCode()) : 0;
-        config.context().put(SessionEnum.TOTAL_COUNT.getCode(), ++count);
-
-        // 检查时间
-        if (config.context().containsKey(SessionEnum.SINGLE_TIME.getCode()) && config.threadId().isPresent()) {
-
-            // 修改单次计时
-            long startTime = (long) config.context().get(SessionEnum.SINGLE_TIME.getCode());
-            long duration = System.currentTimeMillis() - startTime;
-
-            // 修改总计时
-            long totalTime = config.context().containsKey(SessionEnum.TOTAL_DURATION.getCode())
-                    ? (long) config.context().get(SessionEnum.TOTAL_COUNT.getCode()) : 0L;
-            config.context().put(SessionEnum.TOTAL_DURATION.getCode(), duration + totalTime);
-
-            // 输出日志
-            AgentTrace.modelCallEnd(config.threadId().get(), count, duration);
+        Object start = config.context().get(SessionEnum.SINGLE_TIME.getCode());
+        if (!(start instanceof Long startTime)) {
+            return super.afterModel(state, config);
         }
 
+        long duration = System.currentTimeMillis() - startTime;
+        long totalCalls = number(config, SessionEnum.TOTAL_COUNT) + 1;
+        long totalTime = number(config, SessionEnum.TOTAL_DURATION) + duration;
+        config.context().put(SessionEnum.TOTAL_COUNT.getCode(), totalCalls);
+        config.context().put(SessionEnum.TOTAL_DURATION.getCode(), totalTime);
 
+        AgentTrace.modelCall(config.threadId().orElse(null), duration, totalCalls, totalTime);
         return super.afterModel(state, config);
+    }
+
+    private long number(RunnableConfig config, SessionEnum key) {
+        Object value = config.context().get(key.getCode());
+        return value instanceof Number number ? number.longValue() : 0L;
     }
 }

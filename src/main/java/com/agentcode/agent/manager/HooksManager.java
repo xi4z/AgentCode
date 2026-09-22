@@ -1,5 +1,7 @@
 package com.agentcode.agent.manager;
 
+import com.agentcode.agent.hooks.AgentPerformanceHook;
+import com.agentcode.agent.hooks.ModelPerformanceHook;
 import com.alibaba.cloud.ai.graph.agent.hook.Hook;
 import com.alibaba.cloud.ai.graph.agent.hook.hip.HumanInTheLoopHook;
 import com.alibaba.cloud.ai.graph.agent.hook.hip.ToolConfig;
@@ -35,6 +37,13 @@ public class HooksManager {
         private final ChatModel chatModel;
         private final String workspace;
         private final List<Hook> hooks = new ArrayList<>();
+
+        /** 模型调用与轮次审计：账全部记在 config.context() 上 */
+        public Builder performance() {
+            hooks.add(new AgentPerformanceHook());
+            hooks.add(new ModelPerformanceHook());
+            return this;
+        }
 
         /** shell Hooks, 在审批前后防止 Shell 会话中断 */
         public Builder shell(ShellTool2 tool) {
