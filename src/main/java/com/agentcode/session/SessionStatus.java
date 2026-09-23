@@ -9,7 +9,18 @@ package com.agentcode.session;
  * - FREE：其他情况
  */
 public enum SessionStatus {
+    /**
+     * 会话空闲中
+     */
     FREE,
+
+    /**
+     * 会话正在运行
+     */
     RUNNING,
+
+    /**
+     * 会话中断, 等待恢复
+     */
     INTERRUPTED
 }
