@@ -8,7 +8,7 @@ import com.agentcode.factory.AgentSessionFactory;
 import com.agentcode.registry.AgentSessionRegistry;
 import com.agentcode.service.ReactAgentService;
 import com.agentcode.session.AgentSession;
-import com.agentcode.store.InMemoryAgentContextStore;
+import com.agentcode.store.JdbcAgentContextStore;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -19,7 +19,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class ReActAgentServiceImpl implements ReactAgentService {
 
-    private final InMemoryAgentContextStore agentContextStore;
+    private final JdbcAgentContextStore agentContextStore;
     private final AgentSessionFactory agentSessionFactory;
     private final AgentSessionRegistry agentSessionRegistry;
 

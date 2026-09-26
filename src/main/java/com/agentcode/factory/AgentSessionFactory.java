@@ -5,6 +5,8 @@ import com.agentcode.agent.manager.InterceptorManager;
 import com.agentcode.agent.manager.ToolManager;
 import com.agentcode.agent.context.AgentContext;
 import com.agentcode.dto.AgentApprovalManager;
+import com.agentcode.memory.FileMemoryStore;
+import com.agentcode.memory.MemoryStore;
 import com.agentcode.properties.AgentCodeProperties;
 import com.agentcode.session.AgentSession;
 import com.agentcode.session.AgentSessionRuntime;
@@ -37,6 +39,9 @@ public class AgentSessionFactory {
     private final BaseCheckpointSaver saver;
     private final AgentCodeProperties agentCodeProperties;
 
+    /** 记忆库每个工厂一份：写入是 read-modify-write，共用一把锁才不会互相覆盖 */
+    private volatile MemoryStore memoryStore;
+
     public AgentSession create(AgentContext agentContext) {
         String systemPrompt = agentCodeProperties == null ? null : agentCodeProperties.getSystemPrompt();
         return create(agentContext, SessionBuildOptions.builder()
@@ -53,22 +58,52 @@ public class AgentSessionFactory {
         String workspace = resolveWorkspace(agentContext);
         ShellTool2 shellTool2 = ShellTool2.builder(workspace).build();
 
-        List<Hook> hooks = HooksManager.builder(chatModel, workspace)
+        boolean memoryEnabled = options.getMemoryEnabled() != null
+                ? options.getMemoryEnabled()
+                : agentCodeProperties != null && agentCodeProperties.getMemory() != null
+                && agentCodeProperties.getMemory().isEnabled();
+        MemoryStore memory = memoryEnabled ? memoryStore() : null;
+
+        boolean summarizationEnabled = options.getSummarizationEnabled() != null
+                ? options.getSummarizationEnabled()
+                : agentCodeProperties == null || agentCodeProperties.getSummarization() == null
+                || agentCodeProperties.getSummarization().isEnabled();
+        int summarizationMaxTokens = options.getSummarizationMaxTokens() != null
+                ? options.getSummarizationMaxTokens()
+                : agentCodeProperties == null || agentCodeProperties.getSummarization() == null
+                ? 4000 : agentCodeProperties.getSummarization().getMaxTokens();
+        int summarizationKeepMessages = options.getSummarizationKeepMessages() != null
+                ? options.getSummarizationKeepMessages()
+                : agentCodeProperties == null || agentCodeProperties.getSummarization() == null
+                ? 20 : agentCodeProperties.getSummarization().getKeepMessages();
+
+        HooksManager.Builder hookBuilder = HooksManager.builder(chatModel, workspace)
                 .performance() // 模型调用与轮次审计日志
-                .shell(shellTool2) // shell Hooks, 在审批前后防止 Shell 会话中断
-                .summarization() // Token 成本控制
+                .shell(shellTool2); // shell Hooks, 在审批前后防止 Shell 会话中断
+        if (summarizationEnabled) {
+            hookBuilder.summarization(summarizationMaxTokens, summarizationKeepMessages); // Token 成本控制
+        }
+        List<Hook> hooks = hookBuilder
                 .callLimit() // 调用控制
                 .skill() // Skill 侧控制
                 .approval(approvalTools) // 需要人工审批的工具在调用前中断
                 .build();
 
-        List<ToolCallback> tools = ToolManager.builder(workspace).mainAgent().build();
+        List<ToolCallback> tools = ToolManager.builder(workspace, memory).mainAgent().build();
         List<Interceptor> interceptors = InterceptorManager.builder().toolPerformance().build();
+
+        String prompt = agentContext.systemPrompt(systemPrompt);
+        if (memory != null) {
+            String memoryBlock = memory.buildPromptBlock(workspace);
+            if (!memoryBlock.isBlank()) {
+                prompt = prompt + "\n\n" + memoryBlock;
+            }
+        }
 
         ReactAgent reactAgent = ReactAgent.builder()
                 .name("minimal_agent")
                 .model(chatModel)
-                .systemPrompt(agentContext.systemPrompt(systemPrompt))
+                .systemPrompt(prompt)
                 .saver(saver)
                 .tools(tools)
                 .interceptors(interceptors)
@@ -92,6 +127,23 @@ public class AgentSessionFactory {
                 .build();
 
         return new AgentSession(agentContext, runtime);
+    }
+
+    private MemoryStore memoryStore() {
+        MemoryStore local = memoryStore;
+        if (local == null) {
+            synchronized (this) {
+                if (memoryStore == null) {
+                    AgentCodeProperties.Memory config = agentCodeProperties == null
+                            || agentCodeProperties.getMemory() == null
+                            ? new AgentCodeProperties.Memory()
+                            : agentCodeProperties.getMemory();
+                    memoryStore = new FileMemoryStore(config.getWorkspaceFile(), config.getFile(), config.getGlobal());
+                }
+                local = memoryStore;
+            }
+        }
+        return local;
     }
 
     private String resolveWorkspace(AgentContext agentContext) {

@@ -2,6 +2,7 @@ package com.agentcode.agent.manager;
 
 import com.agentcode.agent.hooks.AgentPerformanceHook;
 import com.agentcode.agent.hooks.ModelPerformanceHook;
+import com.agentcode.session.SessionEnum;
 import com.alibaba.cloud.ai.graph.agent.hook.Hook;
 import com.alibaba.cloud.ai.graph.agent.hook.hip.HumanInTheLoopHook;
 import com.alibaba.cloud.ai.graph.agent.hook.hip.ToolConfig;
@@ -38,10 +39,11 @@ public class HooksManager {
         private final String workspace;
         private final List<Hook> hooks = new ArrayList<>();
 
-        /** 模型调用与轮次审计：账全部记在 config.context() 上 */
+        /** 模型调用与轮次审计：账全部记在 config.context() 上，runId 从 metadata 里的 AgentContext 取 */
         public Builder performance() {
-            hooks.add(new AgentPerformanceHook());
-            hooks.add(new ModelPerformanceHook());
+            String contextKey = SessionEnum.AGENT_CONTEXT.getCode();
+            hooks.add(new AgentPerformanceHook(contextKey));
+            hooks.add(new ModelPerformanceHook(contextKey));
             return this;
         }
 
@@ -51,13 +53,17 @@ public class HooksManager {
             return this;
         }
 
-        /** Token 成本控制 */
+        /** Token 成本控制：历史摘要压缩 */
         public Builder summarization() {
+            return summarization(4000, 20);
+        }
+
+        public Builder summarization(int maxTokensBeforeSummary, int messagesToKeep) {
             hooks.add(
                     SummarizationHook.builder()
                             .model(chatModel)
-                            .maxTokensBeforeSummary(4000)
-                            .messagesToKeep(20).build()
+                            .maxTokensBeforeSummary(maxTokensBeforeSummary)
+                            .messagesToKeep(messagesToKeep).build()
             );
             return this;
         }

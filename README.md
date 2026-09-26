@@ -42,6 +42,12 @@ Java/
 │       └── java/com/agentcode/         # 对应模块测试
 ```
 
+## 运行前提
+
+- MySQL 8（默认 `127.0.0.1:3306/agentcode`，连接信息走 `DB_URL` / `DB_USERNAME` / `DB_PASSWORD`，本地见 `.env`）。
+  启动时自动执行 `src/main/resources/schema.sql` 建 `agent_context` 表；图检查点表 `GRAPH_THREAD` / `GRAPH_CHECKPOINT` 由 `MysqlSaver` 自建。
+  跑测试或起服务前先 `set -a; . ./.env; set +a`。
+
 ## 技术栈
 
 - Java 17
@@ -53,10 +59,48 @@ Java/
 ## 常用命令
 
 ```bash
+set -a; . ./.env; set +a   # 连库要 DB_*，见"运行前提"
 mvn clean compile
 mvn test
 mvn spring-boot:run
 ```
+
+## 长期记忆与上下文压缩
+
+**跨会话长期记忆分三层，权限不同**：
+
+| 层 | 位置 | 谁能改 |
+|---|---|---|
+| 全局记忆 | `application.yml` 的 `agentcode.memory.global`（服务核心配置） | 只有人（改配置 + 重启），agent 只读 |
+| 工作区约定 | `<workspace>/Agent.md` | 人；agent 只读 |
+| agent 记忆 | `<workspace>/.memory/memory.md` | agent 自由增删改（`memory_write` / `memory_forget` / `memory_search`），同一工作区的新会话开局即可见 |
+
+开关（都支持环境变量覆盖）：`agentcode.memory.enabled`（`AGENT_MEMORY_ENABLED`，关掉则不注册记忆工具、不注入记忆块）、
+`agentcode.memory.file` / `workspace-file`、`agentcode.summarization.enabled`（`AGENT_SUMMARIZATION_ENABLED`，关掉则不挂历史摘要 Hook）。
+
+```bash
+mvn test -Dtest=LongTermMemoryCrossSessionTest     # 跨会话复用 + 三层权限边界
+mvn test -Dtest=ContextCompressionTokenBenchTest   # 30 组用例量上下文 token（开/关压缩对比）
+```
+
+上下文压缩量化报告：`target/context-compression/report.json`。
+
+## 故障注入 / 崩溃恢复指标
+
+把服务当真进程起、按场景注入故障、再量"能不能跑起来、会话还在不在"：
+
+```bash
+set -a; . ./.env; set +a
+mvn test -Dtest=CrashRestartMetricsIT                                        # 6 个场景 × 3 轮，约 12 分钟
+mvn test -Dtest=CrashRestartMetricsIT -Dcrash.scenarios=sigkill_multi \
+    -Dcrash.rounds=5 -Dcrash.sessions=4                                      # 只跑并发场景、放大样本
+mvn test -Dtest=CrashRestartMetricsIT -Dcrash.scenarios=mysql_down \
+    -Dcrash.dbOutageMs=40000                                                 # 停机窗口拉过 Hikari 取连接超时
+```
+
+场景：`sigkill_model`（模型调用中被 SIGKILL）、`sigterm_model`（优雅停机对照）、`sigkill_multi`（多会话并发）、
+`sigkill_approval`（审批挂起中）、`sigkill_tool`（工具执行中）、`mysql_down`（MySQL 停机窗口）。
+指标落 `target/crash-recovery/metrics.json`，每一轮的现场日志在同目录的 `<场景>/round-N/` 下。
 
 ## 前端入口
 

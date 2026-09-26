@@ -186,6 +186,8 @@ let ws = null;
 let runId = null;
 let busy = false;
 let permissions = new Map();
+/** 已发出、还没收到对应终态的请求数：每轮完成时用它决定是否解锁输入框 */
+let pendingReplies = 0;
 let streamBlock = null;
 let streamKind = null;
 let streamRaw = '';
@@ -333,13 +335,26 @@ function finalizeStream() {
     streamRaw = '';
 }
 
+/**
+ * 输入框只在"没有会话"时禁用：之前用 busy 同时控制可编辑性，导致每轮结束后 footer
+ * 永久置灰（busy=false → disabled），多轮对话实际用不了。忙碌时挡住的是"发送"，
+ * 打字本身可以随时进行。
+ */
 function setBusy(value) {
     busy = value;
-    sendBtn.disabled = !value || !runId;
-    chatInput.disabled = !value || !runId;
-    interruptBtn.disabled = !value || !runId;
-    stopBtn.disabled = !value || !runId;
-    startBtn.disabled = value;
+    chatInput.disabled = !runId;
+    sendBtn.disabled = !runId || value;
+    interruptBtn.disabled = !runId || !value;
+    stopBtn.disabled = !runId || !value;
+    startBtn.disabled = value || !!runId;
+}
+
+/** 所有请求都有终态了才解锁输入框 */
+function releaseIfIdle() {
+    if (pendingReplies <= 0) {
+        pendingReplies = 0;
+        setBusy(false);
+    }
 }
 
 function connect() {
@@ -356,8 +371,15 @@ function connect() {
     ws.onmessage = (event) => handleServerMessage(JSON.parse(event.data));
 }
 
-function send(obj) {
+/**
+ * 发一条请求。expectDone=false 用于不计入终态等待的请求：
+ * 审批答复不另起一轮，它的终态就是同一轮的那个 done/error/stopped/interrupted。
+ */
+function send(obj, expectDone = true) {
     if (ws && ws.readyState === WebSocket.OPEN) {
+        if (expectDone) {
+            pendingReplies++;
+        }
         ws.send(JSON.stringify(obj));
     }
 }
@@ -367,6 +389,15 @@ function nextRequestId() {
 }
 
 function handleServerMessage(msg) {
+    switch (msg.type) {
+        // 一次请求的终态：done/error/stopped/interrupted 各是一次请求的收口
+        case 'done':
+        case 'error':
+        case 'stopped':
+        case 'interrupted':
+            pendingReplies--;
+            break;
+    }
     switch (msg.type) {
         case 'session_started':
             runId = msg.runId;
@@ -387,26 +418,26 @@ function handleServerMessage(msg) {
 
         case 'done':
             finalizeStream();
-            setBusy(false);
+            releaseIfIdle();
             appendMessage('system', '本轮完成');
             break;
 
         case 'error':
             finalizeStream();
-            setBusy(false);
+            releaseIfIdle();
             appendMessage('system', '错误: ' + msg.message);
             break;
 
         case 'stopped':
             finalizeStream();
-            setBusy(false);
+            releaseIfIdle();
             appendMessage('system', '已停止');
             break;
 
         case 'interrupted':
             finalizeStream();
-            setBusy(false);
-            appendMessage('system', '已中断: ' + msg.message);
+            releaseIfIdle();
+            appendMessage('system', '已中断' + (msg.message ? ': ' + msg.message : ''));
             break;
 
         default:
@@ -486,7 +517,7 @@ function appendPermissionRequest(msg) {
             toolName: msg.toolName,
             decision: 'APPROVED',
             arguments: msg.arguments
-        });
+        }, false);
         div.remove();
         appendMessage('system', '已批准工具调用: ' + msg.toolName);
     };
@@ -504,7 +535,7 @@ function appendPermissionRequest(msg) {
             toolName: msg.toolName,
             decision: 'APPROVE_ALL',
             arguments: msg.arguments
-        });
+        }, false);
         div.remove();
         appendMessage('system', '已批准并记录到本会话: ' + msg.toolName);
     };
@@ -522,13 +553,43 @@ function appendPermissionRequest(msg) {
             toolName: msg.toolName,
             decision: 'REJECTED',
             arguments: msg.arguments
-        });
+        }, false);
         div.remove();
         appendMessage('system', '已拒绝工具调用: ' + msg.toolName);
     };
 
+    // EDITED：先改参数再执行，后端按改后的参数跑（AgentInterruptHandle.Decision.EDITED）
+    const edit = document.createElement('button');
+    edit.className = 'secondary';
+    edit.textContent = '改参数';
+    edit.onclick = () => {
+        const edited = prompt('修改本次工具调用的参数（JSON）', msg.arguments || '{}');
+        if (edited === null) return;
+        const trimmed = edited.trim();
+        let args;
+        try {
+            args = JSON.stringify(JSON.parse(trimmed));
+        } catch (e) {
+            args = JSON.stringify({ command: trimmed }); // 非 JSON 就当 shell 命令
+        }
+        permissions.delete(msg.toolCallId);
+        send({
+            type: 'permission_respond',
+            requestId: nextRequestId(),
+            runId,
+            toolCallId: msg.toolCallId,
+            toolName: msg.toolName,
+            decision: 'EDITED',
+            arguments: args,
+            feedback: '用户在 UI 上修改了参数'
+        }, false);
+        div.remove();
+        appendMessage('system', '已按修改后的参数执行: ' + msg.toolName + ' ' + args);
+    };
+
     actions.appendChild(approve);
     actions.appendChild(approveAll);
+    actions.appendChild(edit);
     actions.appendChild(reject);
     div.appendChild(actions);
 }

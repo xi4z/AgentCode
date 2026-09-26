@@ -32,6 +32,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -107,22 +108,35 @@ public class AgentSession {
         if (!current.compareAndSet(null, run)) {
             throw new AgentAlreadyRunningException("会话:" + agentContext.getRunId() + "正在运行");
         }
+        // 开工时刻要在"占住运行槽之后"才写：写在拿到槽之前的话，一个被拒的并发请求
+        // 会把这轮的计时起点推到更早（实测出现 wallClock 136s / 真实轮次 10s 的假数据）。
+        // 审批恢复走的是 run("")，goal 为空时保留原起点，中断挂起的时间仍算进这一轮。
+        if (goal != null && !goal.isBlank()) {
+            agentContext.setAgentStartMs(System.currentTimeMillis());
+        }
+
+        // 本轮是否已经收过口（afterAgent 的 Run E、或中断点的 Run I）；兜底收口只做一次
+        AtomicBoolean completed = new AtomicBoolean(false);
 
         try {
             // 2. 启动内部 Agent，把事件转发到 sink
             run.upstream = reactAgent.stream(goal, runConfig).concatMap(this::classifyMessage)
                     .doOnNext(sink::tryEmitNext)
                     .doOnComplete(() -> {
+                        completed.set(true);
                         // 只释放自己占的槽：本轮若已把槽让给恢复流，这里不能误清
                         current.compareAndSet(run, null);
                         sink.tryEmitComplete();
                     })
                     .doOnError(error -> {
+                        auditRunInterrupted(completed.get());
+                        // 只释放自己占的槽：本轮若已把槽让给恢复流，这里不能误清
                         current.compareAndSet(run, null);
                         sink.tryEmitError(error);
                     })
                     .subscribe();
         } catch (GraphRunnerException e) {
+            auditRunInterrupted(completed.get());
             current.compareAndSet(run, null);
             sink.tryEmitError(e);
             return sink.asFlux();
@@ -144,6 +158,8 @@ public class AgentSession {
         if (upstream != null) {
             upstream.dispose();
         }
+        // dispose 之后 doOnComplete 不会再触发，轮次收口只能在这里补
+        auditRunInterrupted(false);
         run.sink.tryEmitComplete();
     }
 
@@ -254,6 +270,22 @@ public class AgentSession {
         return value instanceof Number number ? number.longValue() : 0L;
     }
 
+    /**
+     * 轮次收口的兜底：图正常走完时 {@code afterAgent} 已经出过 Run E，这里什么都不做；
+     * 异常终止、或停在审批中断点上（HITL 不执行 afterAgent）时补一条 Run I。
+     */
+    private void auditRunInterrupted(boolean completed) {
+        if (completed) {
+            return;
+        }
+        long start = agentContext.getAgentStartMs();
+        AgentTrace.runEvent(agentContext.getRunId(), 'I',
+                config.context().get(SessionEnum.TOTAL_COUNT.getCode()) instanceof Number calls
+                        ? calls.longValue() : 0L,
+                start == 0L ? 0L : System.currentTimeMillis() - start,
+                usageTotal());
+    }
+
     private static long tokenOf(Integer tokens) {
         return tokens == null ? 0L : tokens;
     }
@@ -294,25 +326,37 @@ public class AgentSession {
             // 拿到对应的处理
             InterruptionMetadata.ToolFeedback original = pendingInterrupted.get(handle.getId());
             if (original == null) {
+                // 待审批列表里没有这个 id（重复答复/伪造 id）：跳过，但审计留痕
+                AgentTrace.approval(agentContext.getRunId(), 'A', handle.getName(), handle.getId(),
+                        "decision: " + handle.getDecision() + " ; skipped: not-pending");
                 continue; // 如果待审批的工具中没有发来的, 就直接跳过
             }
             String originalArguments = original.getArguments();
+            String resolvedArguments = approvalManager.resolveArguments(handle, originalArguments);
 
             InterruptionMetadata.ToolFeedback.Builder fbBuilder = InterruptionMetadata.ToolFeedback.builder()
                     .name(handle.getName())
                     .id(handle.getId())
                     .description(handle.getDescription() != null ? handle.getDescription() : original.getDescription())
-                    .arguments(approvalManager.resolveArguments(handle, originalArguments));
+                    .arguments(resolvedArguments);
+
+            // 审计文案单独算：switch 只管落 FeedbackResult，文案里能多带一句后果
+            String audit = switch (handle.getDecision()) {
+                // 记生效的 args，不是原始 args：APPROVE_ALL 也允许前端带改后的参数
+                case APPROVE_ALL ->
+                        "decision: APPROVE_ALL ; session-cache: " + approvalManager.rememberApproval(handle, originalArguments)
+                                + " ; args: " + resolvedArguments;
+                case APPROVED -> "decision: APPROVED ; args: " + resolvedArguments;
+                case EDITED -> "decision: EDITED ; args: " + resolvedArguments;
+                default -> "decision: REJECTED ; result-to-model: rejected-by-user";
+            };
 
             switch (handle.getDecision()) {
-                case APPROVED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
-                case APPROVE_ALL -> {
-                    fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
-                    approvalManager.rememberApproval(handle, originalArguments);
-                }
+                case APPROVED, APPROVE_ALL -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
                 case EDITED -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.EDITED);
                 default -> fbBuilder.result(InterruptionMetadata.ToolFeedback.FeedbackResult.REJECTED);
             }
+            AgentTrace.approval(agentContext.getRunId(), 'A', handle.getName(), handle.getId(), audit);
 
             handledInterruption.addToolFeedback(fbBuilder.build());
             // 没什么问题就移除 pending
@@ -321,26 +365,32 @@ public class AgentSession {
 
         // 如果没有移除干净, 就打回重新写
         if (!pendingInterrupted.isEmpty()) {
+            AgentTrace.approval(agentContext.getRunId(), 'Q', null, null,
+                    "pending: " + pendingInterrupted.size() + " ; not-resumed");
             return Flux.just(new AgentStream(
                     AgentStream.Status.PERMISSION_REQUESTED,
                     approvalManager.toPermissionJson(pendingInterrupted.values().stream().toList())
             ));
         }
+        AgentTrace.approval(agentContext.getRunId(), 'X', null, null, "resume: pending-cleared");
 
         InterruptionMetadata data = handledInterruption.build();
         // 恢复走的是无参 builder，context 是一张全新的表：累计量先取出来，建完再种回去，
         // 否则跨审批的"总量"会跟着旧表一起丢掉（只搬累计量，审批态故意不带过去）
         Map<String, Object> carriedTotals = carryTotals();
+        // ponytail: metadata 里的 AgentContext 只在恢复后被 afterAgent / ModelPerformanceHook 读；
+        // 之前用 addMetadata 写，那是 Builder 上的方法、返回新配置，这一行等于没写（HITL 的 feedback
+        // 同理被丢掉，resume 是靠 HumanInTheLoopHook.run() 里的 threadId 取 checkpoint 恢复的，
+        // 已实测），这里按 context 的写法补上。
         RunnableConfig newConfig = RunnableConfig.builder()
                 .threadId(agentContext.getRunId())
-                // metadata 全新，不补这一行恢复后的模型调用就拿不到 runId
-                .addMetadata(SessionEnum.AGENT_CONTEXT.getCode(), agentContext)
                 .addMetadata(RunnableConfig.HUMAN_FEEDBACK_METADATA_KEY, data)
                 .build();
         config.context().remove(SessionEnum.HANDLED_INTERRUPTED.getCode());
         config.context().remove(SessionEnum.PENDING_INTERRUPTED.getCode());
         config = newConfig;
         config.context().put(SessionEnum.AGENT_CONTEXT.getCode(), agentContext);
+        config.metadata().ifPresent(metadata -> metadata.put(SessionEnum.AGENT_CONTEXT.getCode(), agentContext));
         config.context().putAll(carriedTotals);
         // 第一次流中断后 ShellToolAgentHook 会清理会话，恢复前需要重新初始化 shell session
         shellTool2.getSessionManager().initialize(newConfig);
@@ -384,14 +434,28 @@ public class AgentSession {
                 if (approvalManager.checkPathValid(feedback.getArguments())) {
                     // TODO 路径合法时按后续审批策略决定自动放行或继续询问
                     currFeedback.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
+                    AgentTrace.approval(agentContext.getRunId(), 'S', feedback.getName(), feedback.getId(),
+                            "decision: APPROVED ; reason: path ; args: " + feedback.getArguments());
+                } else {
+                    AgentTrace.approval(agentContext.getRunId(), 'S', feedback.getName(), feedback.getId(),
+                            "decision: REJECTED ; reason: path-outside-workspace ; args: " + feedback.getArguments());
                 }
             } else {
                 // 检查 shell, 需要对可能的多重指令进行拆分并尝试进行模式匹配
                 String command = extractShellCommand(feedback.getArguments());
                 // 静态评估通过，或当前会话已经放行过这条命令/这类命令，则无需再人工审批
-                if (approvalManager.checkCommandValid(command) || approvalManager.isSessionApproved(command)) {
+                if (approvalManager.checkCommandValid(command)) {
                     // TODO 自动放行/恢复执行
                     currFeedback.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
+                    AgentTrace.approval(agentContext.getRunId(), 'S', feedback.getName(), feedback.getId(),
+                            "decision: APPROVED ; reason: allowlist ; command: " + command);
+                } else if (approvalManager.isSessionApproved(command)) {
+                    currFeedback.result(InterruptionMetadata.ToolFeedback.FeedbackResult.APPROVED);
+                    AgentTrace.approval(agentContext.getRunId(), 'S', feedback.getName(), feedback.getId(),
+                            "decision: APPROVED ; reason: session-cache ; command: " + command);
+                } else {
+                    AgentTrace.approval(agentContext.getRunId(), 'S', feedback.getName(), feedback.getId(),
+                            "decision: ASK ; reason: deny-or-unknown ; command: " + command);
                 }
 //                else {
 //                    // TODO 发送 WebSocket 审批请求；用户选择 APPROVE_ALL 时调用
@@ -411,6 +475,14 @@ public class AgentSession {
 
         // 有需要人工审批的工具时，发送 permission.requested 给前端并中断当前流
         if (!waitForHandles.isEmpty()) {
+            AgentTrace.approval(agentContext.getRunId(), 'Q', null, null,
+                    "pending: " + waitForHandles.size() + " ; " + waitForHandles.stream()
+                            .map(InterruptionMetadata.ToolFeedback::getName)
+                            .collect(Collectors.joining(",")));
+            // 图停在中断点上，本轮到这里就结束了：afterAgent 不会执行、上游流也不会 complete
+            // （实测 doOnComplete 直到恢复后才到，那时已经换了一轮），所以收口只能在这里做。
+            // 这一轮此后不会再走 doOnComplete/doOnError，兜底收口不会重复。
+            auditRunInterrupted(false);
             return Flux.just(new AgentStream(
                     AgentStream.Status.PERMISSION_REQUESTED,
                     approvalManager.toPermissionJson(waitForHandles)
@@ -421,6 +493,8 @@ public class AgentSession {
         // 本轮图已经停在中断点上、不会再往前走，所以先把运行槽让给恢复流，它才是接下来真正在跑的那个；
         // 延迟 1ms 是为了避免在 concatMap 处理中重入 run()
         Run holder = current.get();
+        // 全部自动放行同样是"这一轮在中断点结束"，收口后再把槽让给恢复流
+        auditRunInterrupted(false);
         return Flux.defer(() ->
                 Mono.delay(java.time.Duration.ofMillis(1))
                         .flatMapMany(ignore -> {

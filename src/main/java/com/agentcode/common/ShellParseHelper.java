@@ -149,7 +149,11 @@ public final class ShellParseHelper {
      * 将命令按 shell 运算符拆成多个子命令片段
      */
     public static List<String> splitShellSegments(String command) {
-        List<String> tokens = ShellParseHelper.splitCommand(command);
+        // 换行/回车在 shell 里等价于命令分隔符，但分词只按空白切、会把它吞掉，
+        // 于是 "ls\nrm -rf x" 会冒充成一条 "ls rm -rf x" 骗过"首 token 在安全名单"的检查。
+        // 先归一成 ;，再交给分词器当运算符处理。
+        String normalized = command.replace("\r\n", " ; ").replace('\n', ';').replace('\r', ';');
+        List<String> tokens = ShellParseHelper.splitCommand(normalized);
         List<String> segments = new ArrayList<>();
         StringBuilder current = new StringBuilder();
 

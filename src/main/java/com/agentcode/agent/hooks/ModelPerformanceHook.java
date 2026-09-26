@@ -1,11 +1,11 @@
 package com.agentcode.agent.hooks;
 
 import com.agentcode.agent.AgentTrace;
+import com.agentcode.agent.context.AgentContext;
 import com.agentcode.session.SessionEnum;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.agent.hook.ModelHook;
-import lombok.NoArgsConstructor;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -18,8 +18,14 @@ import java.util.concurrent.CompletableFuture;
  * token 用量不在这里：{@code _TOKEN_USAGE_} 被 GraphRunnerContext 截成私有字段、不进 state，
  * 用量由会话层从 {@code NodeOutput.tokenUsage()} 侧补记。
  */
-@NoArgsConstructor
 public class ModelPerformanceHook extends ModelHook {
+
+    /** config.metadata() 里 AgentContext 的键（SessionEnum.AGENT_CONTEXT），用于取 runId */
+    private final String contextKey;
+
+    public ModelPerformanceHook(String contextKey) {
+        this.contextKey = contextKey;
+    }
 
     @Override
     public String getName() {
@@ -45,8 +51,19 @@ public class ModelPerformanceHook extends ModelHook {
         config.context().put(SessionEnum.TOTAL_COUNT.getCode(), totalCalls);
         config.context().put(SessionEnum.TOTAL_DURATION.getCode(), totalTime);
 
-        AgentTrace.modelCall(config.threadId().orElse(null), duration, totalCalls, totalTime);
+        AgentTrace.modelCall(runId(config), duration, totalCalls, totalTime);
         return super.afterModel(state, config);
+    }
+
+    /**
+     * runId 优先取 metadata 里的 AgentContext：审批恢复时重建的 config 上没有 threadId，
+     * 只认 threadId 的话恢复后的模型调用会打成 "RunId -"。
+     */
+    private String runId(RunnableConfig config) {
+        return config.metadata(contextKey)
+                .filter(AgentContext.class::isInstance)
+                .map(agentContext -> ((AgentContext) agentContext).getRunId())
+                .orElseGet(() -> config.threadId().orElse(null));
     }
 
     private long number(RunnableConfig config, SessionEnum key) {

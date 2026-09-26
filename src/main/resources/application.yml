@@ -5,6 +5,18 @@ spring:
   profiles:
     active: ${SPRING_PROFILES_ACTIVE:dev}
 
+  datasource:
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/agentcode?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+    driver-class-name: ${DB_DRIVER:com.mysql.cj.jdbc.Driver}
+
+  sql:
+    init:
+      # 每次启动跑一遍建表脚本（CREATE TABLE IF NOT EXISTS，幂等）；连不上库就快速失败
+      mode: ${DB_INIT_MODE:always}
+      schema-locations: ${DB_SCHEMA_LOCATIONS:classpath:schema.sql}
+
   ai:
     model:
       # openai / dashscope / anthropic / ollama
@@ -37,8 +49,19 @@ spring:
         enabled: ${MCP_CLIENT_ENABLED:false}
 
 agentcode:
-  audit:
-    enabled: ${AGENTCODE_AUDIT_ENABLED:true}
+  # 长期记忆：三层权限 —— 全局记忆（这里，只读）/ 工作区 Agent.md（只读）/ 工作区 .memory/memory.md（agent 可写）
+  memory:
+    enabled: ${AGENT_MEMORY_ENABLED:true}
+    file: ${AGENT_MEMORY_FILE:.memory/memory.md}
+    workspace-file: ${AGENT_MEMORY_WORKSPACE_FILE:Agent.md}
+    # 全局记忆正文写在这里：agent 只能读，不能改（要改得动配置并重启）
+    global: ${AGENT_GLOBAL_MEMORY:}
+  # 上下文压缩：长任务历史摘要
+  summarization:
+    enabled: ${AGENT_SUMMARIZATION_ENABLED:true}
+    max-tokens: ${AGENT_SUMMARIZATION_MAX_TOKENS:4000}
+    keep-messages: ${AGENT_SUMMARIZATION_KEEP_MESSAGES:20}
+
   agent:
     max-steps: ${AGENT_MAX_STEPS:20}
     system-prompt: ${AGENT_SYSTEM_PROMPT:You are a helpful AI assistant. Use the available tools to complete the user's goal. When the goal is fully achieved, respond with a final answer and do not call any more tools.}

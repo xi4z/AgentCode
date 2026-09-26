@@ -4,7 +4,7 @@ import com.agentcode.dto.AgentInterruptHandle;
 import com.agentcode.dto.AgentStream;
 import com.agentcode.agent.context.AgentContext;
 import com.agentcode.service.ReactAgentService;
-import com.agentcode.store.InMemoryAgentContextStore;
+import com.agentcode.store.JdbcAgentContextStore;
 import com.agentcode.websocket.ChatProtocol.ClientMessage;
 import com.agentcode.websocket.ChatProtocol.ServerMessage;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -41,7 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class ChatWebSocketHandler implements WebSocketHandler {
 
     private final ReactAgentService agentService;
-    private final InMemoryAgentContextStore contextStore;
+    private final JdbcAgentContextStore contextStore;
     private final ObjectMapper objectMapper;
 
     /**
@@ -206,7 +206,8 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         AgentInterruptHandle.Decision decision;
         try {
             decision = AgentInterruptHandle.Decision.valueOf(message.decision().trim().toUpperCase());
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException | NullPointerException e) {
+            // decision 允许为空，空串/空白串会走到这里，不能直接把 null 传给审批侧
             send(outbound, ServerMessage.error(message.requestId(), message.runId(),
                     "未知 decision: " + message.decision() + "，可选 APPROVED/APPROVE_ALL/REJECTED/EDITED"));
             return;

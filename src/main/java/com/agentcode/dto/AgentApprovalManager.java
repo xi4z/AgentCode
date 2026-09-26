@@ -7,6 +7,9 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -37,6 +40,13 @@ public class AgentApprovalManager {
             Pattern.compile("\\$\\{?PWD\\b"),               // $PWD variable
             Pattern.compile("(^|\\s|;|&&|\\|\\|)cd(\\s|$)") // explicit cd
     );
+
+    /**
+     * 段内出现这些字符，说明"这条命令不止表面那么简单"：重定向能把只读命令变成写文件，
+     * 命令替换与变量展开能把安全命令名当壳子跑别的命令，& 能把命令丢到后台。
+     * 命中就不再自动放行，交给人工审批。
+     */
+    private static final Pattern SHELL_META_PATTERN = Pattern.compile("[<>`&$()]");
 
     private final AgentContext agentContext;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -75,19 +85,24 @@ public class AgentApprovalManager {
     }
 
     /**
-     * APPROVE_ALL：当前会话放行该命令，后续相同命令不再审批
+     * APPROVE_ALL：当前会话放行该命令，后续相同命令不再审批。
+     *
+     * @return 审计文案：缓存了什么、或为什么没缓存
      */
-    public void rememberApproval(AgentInterruptHandle handle, String originalArguments) {
+    public String rememberApproval(AgentInterruptHandle handle, String originalArguments) {
         if (handle.getName() == null || !handle.getName().equalsIgnoreCase("shell")) {
-            return;
+            return "not-applicable(非 shell 工具，审批缓存不适用)";
         }
         try {
             String command = ShellParseHelper.extractShellCommand(originalArguments);
             if (command != null && !command.isBlank()) {
                 approveCommandForSession(command);
+                return command;
             }
+            return "not-cached(命令解析为空)";
         } catch (Exception ignored) {
             // 参数解析失败时不缓存，避免错误放行
+            return "not-cached(参数解析失败)";
         }
     }
 
@@ -149,6 +164,11 @@ public class AgentApprovalManager {
 
         // outside-cwd 强制 ASK，不允许被安全名单绕过
         if (matchesOutsideCwd(segment)) {
+            return false;
+        }
+
+        // 重定向 / 命令替换 / 变量展开 / 后台符：同样不能被安全名单绕过
+        if (SHELL_META_PATTERN.matcher(segment).find()) {
             return false;
         }
 
@@ -224,22 +244,56 @@ public class AgentApprovalManager {
     }
 
     /**
-     * 检查文件工具参数中的路径是否仍位于工作区内
+     * 检查文件工具参数中的路径是否仍位于工作区内。
+     *
+     * <p>参数名按工具真实 schema 取：{@code FileSystemTools} 的方法参数是 {@code filePath}，
+     * 旧写法 {@code filepath} 一并兼容 —— 只认其中一个的话，另一个 key 的请求会恒判"区外"，
+     * 校验器等于没在工作。
+     *
+     * <p>除了 {@code normalize()} 比前缀，路径（或父目录）存在时还要按 {@code toRealPath()} 再判一次，
+     * 否则工作区里一条指向外面的软链就能把写入带出去。
      */
-    public boolean checkPathValid(String path) {
-        String filePath;
-        try {
-            JsonNode root = objectMapper.readTree(path);
-            filePath = root.path("filepath").asText();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-        if (filePath.isEmpty()) {
+    public boolean checkPathValid(String argumentsJson) {
+        String filePath = extractFilePath(argumentsJson);
+        if (filePath.isBlank()) {
             return false;
         }
         Path basePath = Paths.get(agentContext.getWorkspace()).toAbsolutePath().normalize();
-        Path resolvedPath = basePath.resolve(filePath);
-        Path normalizedPath = resolvedPath.normalize();
-        return normalizedPath.startsWith(basePath);
+        Path normalizedPath;
+        try {
+            normalizedPath = basePath.resolve(filePath).normalize();
+        } catch (InvalidPathException e) {
+            // 空字节之类的非法路径：直接不放行
+            return false;
+        }
+        if (!normalizedPath.startsWith(basePath)) {
+            return false;
+        }
+        try {
+            Path probe = Files.exists(normalizedPath) ? normalizedPath : normalizedPath.getParent();
+            if (probe != null && Files.exists(probe)) {
+                return probe.toRealPath().startsWith(basePath.toRealPath());
+            }
+        } catch (IOException e) {
+            // 解析不出真实路径（权限/断链）时按不放行处理
+            return false;
+        }
+        return true;
+    }
+
+    /** 从工具参数 JSON 取路径；解析失败或类型不对返回空串（调用方按不放行处理） */
+    private String extractFilePath(String argumentsJson) {
+        try {
+            JsonNode root = objectMapper.readTree(argumentsJson);
+            for (String key : List.of("filePath", "filepath", "file_path", "path")) {
+                JsonNode value = root.path(key);
+                if (value.isTextual() && !value.asText().isBlank()) {
+                    return value.asText();
+                }
+            }
+        } catch (Exception ignored) {
+            // 解析失败按空路径处理
+        }
+        return "";
     }
 }

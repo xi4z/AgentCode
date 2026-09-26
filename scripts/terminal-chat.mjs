@@ -238,7 +238,7 @@ async function chatToSession(content) {
         return;
     }
     if (busy) {
-        log('当前有任务正在执行，请先等待完成或使用 stop/interrupt');
+        log('上一轮还没结束：可以先用 stop / interrupt，或等 done');
         return;
     }
     busy = true;

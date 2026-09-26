@@ -30,6 +30,14 @@ public class AgentContext {
     @Builder.Default
     StringBuilder sessionNotes = new StringBuilder();
 
+    /**
+     * 本轮 run 的开工时刻。放这里而不是 {@code RunnableConfig.context()}：审批恢复会重建一张
+     * 全新的 context 表，旧表里的开工时刻带不过去，SessionEnd 的 wallClock 会假报 0。
+     * 新一轮（run 收到非空 goal）重置，审批恢复（goal 为空）沿用原值 —— 中断挂起的时间要算进去。
+     */
+    volatile long agentStartMs;
+
+
 
 
 

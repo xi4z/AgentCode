@@ -59,3 +59,6 @@ out/
 build/
 dist/
 *.hprof
+
+# Eval 运行产物（套件与 fixtures 本身要提交）
+eval/results/

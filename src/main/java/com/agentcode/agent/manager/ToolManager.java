@@ -1,12 +1,14 @@
 package com.agentcode.agent.manager;
 
 import com.agentcode.agent.tools.SessionNoteTools;
+import com.agentcode.memory.MemoryStore;
+import com.agentcode.tools.MemoryTools;
 import com.alibaba.cloud.ai.graph.agent.AgentTool;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.extension.tools.filesystem.FileSystemTools;
 import com.alibaba.cloud.ai.graph.agent.tools.GlobSearchTool;
 import com.alibaba.cloud.ai.graph.agent.tools.GrepSearchTool;
-import com.alibaba.cloud.ai.graph.store.stores.MemoryStore;
+
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
@@ -24,6 +26,11 @@ public class ToolManager {
         return new Builder(workspace, null);
     }
 
+    /** memoryStore 为 null = 长期记忆关闭，不注册记忆工具 */
+    public static Builder builder(String workspace, MemoryStore memoryStore) {
+        return new Builder(workspace, memoryStore);
+    }
+
     @RequiredArgsConstructor
     public static class Builder {
 
@@ -38,6 +45,7 @@ public class ToolManager {
             this.withSearchTools();
             this.withFileSystemTools();
             this.withSessionNotesTools();
+            this.withMemoryTools();
             return this;
         }
 
@@ -92,24 +100,24 @@ public class ToolManager {
         }
 
         /**
-         * 长期记忆工具组（文件式拉取召回 + 模型自主写入/遗忘）。
-         * 取代旧链路：beforeAgent 每轮主动注入 → 实测把大半个库灌进提示词；
-         * afterAgent 后台抽取 + ES 向量去重 → 复杂度不成比例。现在记忆 = markdown 文件，
-         * 索引随会话起点注入，全文检索与增删都由模型调用这三个工具完成。
-         * <p>
-         * 暂时不使用
+         * 长期记忆工具组：memory_search / memory_write / memory_forget。
+         *
+         * <p>只在装配了记忆库（{@code agentcode.memory.enabled=true}）时注册；写入只作用于
+         * 工作区 {@code .memory/memory.md}，全局记忆与 Agent.md 是只读层。
+         * 注意这三个工具不挂审批门禁 —— 它们只能动 agent 自己那份记忆文件，路径由服务端固定，
+         * 模型给不出路径，越界写不出去（见 FileMemoryStore）。
          */
-//        public Builder withMemoryTools(){
-//            if (memoryStore == null) {
-//                return this;   // 未装配记忆库时静默不注册，不影响其它工具
-//            }
-//            convertCallbacksToMap(
-//                    MethodToolCallbackProvider.builder()
-//                            .toolObjects(new MemoryTools(memoryStore))
-//                            .build()
-//                            .getToolCallbacks());
-//            return this;
-//        }
+        public Builder withMemoryTools() {
+            if (memoryStore == null) {
+                return this;   // 未装配记忆库时静默不注册，不影响其它工具
+            }
+            convertCallbacksToMap(
+                    MethodToolCallbackProvider.builder()
+                            .toolObjects(new MemoryTools(memoryStore))
+                            .build()
+                            .getToolCallbacks());
+            return this;
+        }
         public List<ToolCallback> build() {
             return toolCallbacks.values().stream().toList();
         }
