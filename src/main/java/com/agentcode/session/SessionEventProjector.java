@@ -23,6 +23,7 @@ public final class SessionEventProjector {
     }
 
     public static final class State {
+        // 同一次工具调用会跨越 start/delta/end 多个 chunk，只广播一次工具名。
         private final Set<String> announcedTools = new HashSet<>();
         private final Set<String> finishedTools = new HashSet<>();
     }
@@ -31,6 +32,7 @@ public final class SessionEventProjector {
         return new State();
     }
 
+    /** 把单条 SessionEvent 投影为若干前端帧；terminal 表示目标回合已经结束。 */
     public static Projection project(State state, SessionEvent event) {
         List<AgentStream> streams = new ArrayList<>();
         boolean terminal = false;
@@ -48,6 +50,7 @@ public final class SessionEventProjector {
                 if (toolCallId == null && event.data().get("result") instanceof java.util.Map<?, ?> result) {
                     toolCallId = result.get("id");
                 }
+                // 一次工具执行可能同时产生 action/end 与 tool/result，按 toolCallId 去重。
                 String key = toolCallId == null ? "unknown" : String.valueOf(toolCallId);
                 if (state.finishedTools.add(key)) {
                     streams.add(
@@ -56,6 +59,7 @@ public final class SessionEventProjector {
                 }
             }
             case "interaction/requested" -> {
+                // 挂起审批：前端拿到 requestId 后通过 pending() 换取完整调用信息。
                 streams.add(
                         new AgentStream(
                                 AgentStream.Status.PERMISSION_REQUESTED,
@@ -100,6 +104,7 @@ public final class SessionEventProjector {
         if (!(rawContent instanceof List<?> blocks)) {
             return;
         }
+        // chunk 内的内容块与前端渲染一一对应：文本、思考、工具调用。
         for (Object value : blocks) {
             ContentBlock block = JsonUtils.getJsonCodec().convertValue(value, ContentBlock.class);
             if (block instanceof TextBlock text && !text.getText().isEmpty()) {
@@ -128,6 +133,7 @@ public final class SessionEventProjector {
         if (rawMessage == null) {
             return;
         }
+        // 完整 assistant 消息用于收口：前端用它替换已流式渲染的临时文本。
         Msg message = JsonUtils.getJsonCodec().convertValue(rawMessage, Msg.class);
         String thinking =
                 message.getContentBlocks(ThinkingBlock.class).stream()

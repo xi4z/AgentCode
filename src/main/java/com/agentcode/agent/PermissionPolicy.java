@@ -25,6 +25,12 @@ public class PermissionPolicy {
                     "session_search",
                     "todo_write");
 
+    /**
+     * 构造每个会话初始使用的权限上下文。
+     *
+     * <p>只要存在 allow 规则，权限引擎就不会走 trivial 快速路径；未显式放行的工具会落到默认
+     * ASK，由前端展示审批。
+     */
     public PermissionContextState context() {
         PermissionContextState.Builder builder =
                 PermissionContextState.builder().mode(PermissionMode.DEFAULT);

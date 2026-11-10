@@ -8,6 +8,9 @@ import java.util.List;
 
 /**
  * 把工作区中的项目说明文件拼进系统提示词。
+ *
+ * <p>读取顺序固定为 {@code .kama/context.md}、{@code AGENTS.md}、{@code AGENT.md}、
+ * {@code CLAUDE.md}、{@code SOUL.md}，命中第一个非空文件后停止。
  */
 public final class WorkspacePrompt {
 

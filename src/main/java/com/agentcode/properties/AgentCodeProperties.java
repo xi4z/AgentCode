@@ -2,6 +2,7 @@ package com.agentcode.properties;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+/** Agent 运行参数；对应 application.yml 中的 {@code agentcode.*}。 */
 @ConfigurationProperties(prefix = "agentcode")
 public class AgentCodeProperties {
 
@@ -21,6 +22,7 @@ public class AgentCodeProperties {
         return session;
     }
 
+    /** Agent 身份、系统提示词与回合上限。 */
     public static class Agent {
         private String name = "AgentCode";
         private String agentId = "agentcode";
@@ -71,6 +73,7 @@ public class AgentCodeProperties {
         }
     }
 
+    /** 模型 provider 与生成参数。 */
     public static class Model {
         private String provider = "openai";
         private String apiKey = "";
@@ -137,6 +140,7 @@ public class AgentCodeProperties {
         }
     }
 
+    /** 会话元数据、状态存储与事件轮询参数。 */
     public static class Session {
         private String runtimeDir = System.getProperty("user.home") + "/.agentcode";
         private long pollIntervalMillis = 150;

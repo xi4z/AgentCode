@@ -23,6 +23,8 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 工作区 shell 工具。命令在宿主进程执行，审批策略见 {@link ShellPolicy}。
+ *
+ * <p>工具只负责执行与参数校验；是否放行由 {@link #checkPermissions} 与权限引擎决定。
  */
 public final class ShellTool extends ToolBase {
 
@@ -66,6 +68,7 @@ public final class ShellTool extends ToolBase {
         if (ruleContent == null) {
             return true;
         }
+        // 规则内容可以是精确命令，也可以是 * / ? 通配符；APPROVE_ALL 写入的是精确命令。
         String command = stringValue(toolInput.get("command"));
         if (ruleContent.equals(command)) {
             return true;
@@ -84,6 +87,7 @@ public final class ShellTool extends ToolBase {
 
     @Override
     public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+        // 进程等待与流读取都是阻塞操作，放到 boundedElastic，避免阻塞模型事件循环。
         return Mono.fromCallable(() -> execute(param.getInput()))
                 .subscribeOn(Schedulers.boundedElastic());
     }
@@ -122,6 +126,7 @@ public final class ShellTool extends ToolBase {
                 CompletableFuture.supplyAsync(
                         () -> {
                             try {
+                                // 输出必须在等待进程结束前并发读取，否则大输出会填满管道导致死锁。
                                 return new String(
                                         process.getInputStream().readAllBytes(),
                                         StandardCharsets.UTF_8);
@@ -134,6 +139,7 @@ public final class ShellTool extends ToolBase {
         try {
             finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
+                // 超时后强制结束进程组；输出线程最多再等 2 秒，避免读取端一直挂住。
                 process.destroyForcibly();
                 process.waitFor(5, TimeUnit.SECONDS);
             }

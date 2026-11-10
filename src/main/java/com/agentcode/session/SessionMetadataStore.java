@@ -40,6 +40,7 @@ public class SessionMetadataStore {
         Path target = directory.resolve(metadata.runId() + ".json");
         Path temporary = directory.resolve(metadata.runId() + ".json.tmp");
         try {
+            // 先写临时文件再原子替换，避免进程中断留下半个 JSON。
             objectMapper.writeValue(temporary.toFile(), metadata);
             Files.move(
                     temporary,
@@ -74,6 +75,7 @@ public class SessionMetadataStore {
     }
 
     private static void requireId(String runId) {
+        // runId 直接拼进文件名，必须是受限字符集，避免路径穿越。
         if (runId == null || !RUN_ID.matcher(runId).matches()) {
             throw new IllegalArgumentException("非法会话标识: " + runId);
         }

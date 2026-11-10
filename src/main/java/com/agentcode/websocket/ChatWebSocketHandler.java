@@ -49,6 +49,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         Sinks.Many<String> outbound = Sinks.many().unicast().onBackpressureBuffer();
 
         Mono<Void> output = session.send(outbound.asFlux().map(session::textMessage));
+        // 接收循环只负责解析客户端命令；Agent 的执行属于 AgentSession，不挂在连接上。
         Mono<Void> input =
                 session.receive()
                         .map(WebSocketMessage::getPayloadAsText)
@@ -192,6 +193,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         String key = connectionId + ":" + runId;
         AtomicBoolean permissionRequested = new AtomicBoolean(false);
         AtomicBoolean failed = new AtomicBoolean(false);
+        // 订阅对象要能在自己的 doFinally 里精确摘除，避免旧订阅完成时误删新订阅。
         AtomicReference<Disposable> self = new AtomicReference<>();
         Disposable disposable =
                 chatService
@@ -199,6 +201,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                         .doOnNext(
                                 event -> {
                                     if (event.status() == AgentStream.Status.PERMISSION_REQUESTED) {
+                                        // 挂起回合不会发送 done；审批结果到达后由新的订阅继续。
                                         permissionRequested.set(true);
                                         sendPendingPermissions(outbound, requestId, runId);
                                     } else {
@@ -260,6 +263,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
     }
 
     private void cleanupConnection(String connectionId) {
+        // 只释放本连接的事件订阅；Agent 任务继续在 AgentSession 中执行。
         subscriptions
                 .entrySet()
                 .removeIf(

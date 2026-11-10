@@ -11,7 +11,11 @@ public final class ChatProtocol {
     private ChatProtocol() {
     }
 
-    /** 客户端 -> 服务端 */
+    /**
+     * 客户端 -> 服务端。
+     *
+     * <p>{@code afterSeq} 只用于 attach；其余字段按消息类型取用，未使用字段保持 null。
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ClientMessage(
             String type,
@@ -29,7 +33,11 @@ public final class ChatProtocol {
             Long afterSeq) {
     }
 
-    /** 服务端 -> 客户端 */
+    /**
+     * 服务端 -> 客户端。
+     *
+     * <p>{@code seq} 是持久会话事件序号；前端保存它并在重连时作为 attach 的起点。
+     */
     public record ServerMessage(
             String type,
             String requestId,

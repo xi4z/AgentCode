@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/** 验证安全命令、危险命令与复合命令的自动审批边界。 */
 class ShellPolicyTest {
 
     private final ShellPolicy policy = new ShellPolicy();
