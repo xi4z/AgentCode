@@ -13,35 +13,27 @@
 
 ## 结构
 
-```text
-src/main/java/com/agentcode/
-├── agent/
-│   ├── PermissionPolicy.java        # 只读工具放行，写入与 shell 默认询问
-│   ├── ShellPolicy.java             # 安全命令、危险命令、越界路径判定
-│   ├── ShellTool.java               # 工作区 shell 工具，参与权限引擎
-│   ├── WorkspacePrompt.java         # 项目说明文件注入系统提示词
-│   ├── WorkspaceRuntime.java        # 一个工作区一个 HarnessAgent
-│   └── WorkspaceRuntimeRegistry.java
-├── config/
-│   ├── JacksonConfig.java
-│   └── ModelConfig.java             # OpenAI 兼容端点 / DashScope
-├── dto/AgentStream.java             # 推送给前端的帧
-├── session/
-│   ├── AgentChatService.java        # 提交任务、审批恢复、事件轮询
-│   ├── PendingPermission.java
-│   ├── SessionEventProjector.java   # 持久事件 -> 前端帧
-│   ├── SessionMetadata.java
-│   ├── SessionMetadataStore.java    # runId 与工作区绑定，跨进程存活
-│   └── SessionNotFoundException.java
-├── websocket/
-│   ├── ChatProtocol.java
-│   ├── ChatWebSocketHandler.java
-│   ├── HomeRouter.java
-│   └── WebSocketConfig.java
-├── common/ShellParseHelper.java
-├── properties/AgentCodeProperties.java
-└── AgentCodeApplication.java
-```
+- `agent/`
+  - `PermissionPolicy`：只读工具放行，写入与 shell 默认询问。
+  - `ShellPolicy`：安全命令、危险命令、越界路径判定。
+  - `ShellTool`：工作区 shell 工具，参与权限引擎。
+  - `WorkspacePrompt`：项目说明文件注入系统提示词。
+  - `WorkspaceRuntime`：一个工作区一个 `HarnessAgent`。
+  - `WorkspaceRuntimeRegistry`：按工作区缓存与释放运行时。
+- `config/`
+  - `JacksonConfig`：Jackson 2 的 `ObjectMapper`。
+  - `ModelConfig`：OpenAI 兼容端点与 DashScope。
+- `dto/AgentStream`：推送给前端的帧。
+- `session/`
+  - `AgentChatService`：提交任务、审批恢复、事件轮询。
+  - `PendingPermission`：待审批工具调用。
+  - `SessionEventProjector`：持久事件转换前端帧。
+  - `SessionMetadata`、`SessionMetadataStore`：`runId` 与工作区绑定，跨进程存活。
+  - `SessionNotFoundException`。
+- `websocket/`：`ChatProtocol`、`ChatWebSocketHandler`、`HomeRouter`、`WebSocketConfig`。
+- `common/ShellParseHelper`：命令拆分与通配符。
+- `properties/AgentCodeProperties`：配置绑定。
+- `AgentCodeApplication`：启动入口。
 
 ## 会话模型
 
