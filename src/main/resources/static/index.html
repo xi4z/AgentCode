@@ -166,7 +166,7 @@
 
     <div class="session-box">
         <div class="row">
-            <input type="text" id="workspace" placeholder="工作区路径, 例如 /tmp 或当前项目路径" value="/tmp">
+            <input type="text" id="workspace" placeholder="工作区路径，留空则使用服务进程当前目录">
             <button class="primary" id="startBtn">开始会话</button>
         </div>
         <textarea id="goal" placeholder="输入本轮目标, 例如: 列出当前目录下的文件"></textarea>
@@ -189,6 +189,8 @@ let permissions = new Map();
 let streamBlock = null;
 let streamKind = null;
 let streamRaw = '';
+let lastSeq = 0;
+let reconnectTimer = null;
 
 const log = document.getElementById('log');
 const runBadge = document.getElementById('runBadge');
@@ -345,12 +347,28 @@ function setBusy(value) {
 function connect() {
     ws = new WebSocket(wsUrl);
     ws.onopen = () => {
-        appendMessage('system', 'WebSocket 已连接: ' + wsUrl);
+        if (runId) {
+            appendMessage('system', '已重新连接，正在从事件 ' + lastSeq + ' 继续读取');
+            send({
+                type: 'attach',
+                requestId: nextRequestId(),
+                runId: runId,
+                afterSeq: lastSeq
+            });
+        } else {
+            appendMessage('system', 'WebSocket 已连接: ' + wsUrl);
+        }
     };
     ws.onclose = () => {
         appendMessage('system', 'WebSocket 连接已断开');
         setBusy(false);
         startBtn.disabled = false;
+        if (runId && !reconnectTimer) {
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connect();
+            }, 800);
+        }
     };
     ws.onerror = () => appendMessage('system', 'WebSocket 出错');
     ws.onmessage = (event) => handleServerMessage(JSON.parse(event.data));
@@ -370,12 +388,16 @@ function handleServerMessage(msg) {
     switch (msg.type) {
         case 'session_started':
             runId = msg.runId;
+            lastSeq = 0;
             runBadge.textContent = '会话: ' + runId;
             appendMessage('system', '会话已创建: ' + runId);
             appendMessage('assistant', '会话创建成功，开始执行目标...');
             break;
 
         case 'agent_event':
+            if (msg.seq !== undefined && msg.seq !== null) {
+                lastSeq = Math.max(lastSeq, Number(msg.seq));
+            }
             appendAgentEvent(msg.status, msg.content);
             break;
 
@@ -416,6 +438,20 @@ function handleServerMessage(msg) {
 
 function appendAgentEvent(status, content) {
     if (status === 'PERMISSION_REQUESTED') {
+        return;
+    }
+    if (status === 'TURN_STARTED') {
+        appendMessage('system', 'Agent 开始处理');
+        return;
+    }
+    if (status === 'TURN_FINISHED') {
+        finalizeStream();
+        return;
+    }
+    if (status === 'ERROR') {
+        finalizeStream();
+        setBusy(false);
+        appendMessage('system', '错误: ' + (content || '未知错误'));
         return;
     }
     if (status === 'TOOL_FINISHED') {
@@ -545,7 +581,7 @@ startBtn.onclick = () => {
         type: 'start_session',
         requestId: nextRequestId(),
         goal,
-        workspace: document.getElementById('workspace').value.trim() || '/tmp'
+        workspace: document.getElementById('workspace').value.trim()
     });
 };
 

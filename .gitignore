@@ -49,6 +49,8 @@ application-prod.yml
 
 # Agent runtime data
 .agentcode/
+.agentscope/
+.agentscope-runtime/
 runs/
 sessions/
 traces/

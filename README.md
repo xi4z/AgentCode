@@ -1,106 +1,146 @@
 # AgentCode Java
 
-AgentCode 的 Java 实现骨架，基于 Spring Boot + Spring AI Alibaba。
+基于 **AgentScope Java 2.1.0-BETA1** 的编码 Agent 运行时。项目保留了 WebSocket 前端、shell 审批策略与工作区约定，把会话、事件、权限、工具执行和状态持久化交给 AgentScope。
 
-> 当前仅包含项目骨架，不包含业务代码。
+## 运行环境
 
-## 目录结构
+- JDK 17 及以上
+- Spring Boot 4.0.9
+- Maven 3.6.3 及以上
+- AgentScope Java 2.1.0-BETA1（固定版本）
+
+2.0.4 是当前稳定版，但没有 `AgentSession`、`SessionLog`、持久 inbox 与游标重放；这些能力在 2.1.0-BETA1 中提供。项目固定使用 2.1.0-BETA1，升级前需要重新核对 API。
+
+## 结构
 
 ```text
-Java/
-├── pom.xml
-├── src/
-│   ├── main/
-│   │   ├── java/com/agentcode/
-│   │   │   ├── agent/                  # Agent 编排：Graph、Node、Subagent
-│   │   │   │   ├── graph/
-│   │   │   │   ├── node/
-│   │   │   │   └── subagent/
-│   │   │   ├── common/                 # 通用 DTO / 结果类型 / 常量
-│   │   │   ├── compact/                # 上下文压缩
-│   │   │   ├── config/                 # Spring 配置与属性绑定
-│   │   │   ├── context/                # AgentContext / ExecutionContext
-│   │   │   ├── event/                  # 事件发布与 SSE/WebSocket 推送
-│   │   │   ├── mcp/                    # MCP 客户端与工具适配
-│   │   │   ├── permission/             # 权限策略与拦截
-│   │   │   │   ├── policy/
-│   │   │   │   └── interceptor/
-│   │   │   ├── session/                # 会话、记忆、持久化
-│   │   │   │   ├── memory/
-│   │   │   │   ├── model/
-│   │   │   │   └── store/
-│   │   │   ├── skill/                  # Skills 加载与渲染
-│   │   │   ├── task/                   # 任务管理
-│   │   │   ├── tool/                   # 工具定义与调用
-│   │   │   │   ├── builtin/
-│   │   │   │   └── callback/
-│   │   │   ├── trace/                  # 可观测性与 Trace
-│   │   │   └── transport/              # 对外通信（WebSocket/SSE/JSON-RPC）
-│   │   └── resources/
-│   │       └── application.yml         # Spring 配置
-│   └── test/
-│       └── java/com/agentcode/         # 对应模块测试
+src/main/java/com/agentcode/
+├── agent/
+│   ├── PermissionPolicy.java        # 只读工具放行，写入与 shell 默认询问
+│   ├── ShellPolicy.java             # 安全命令、危险命令、越界路径判定
+│   ├── ShellTool.java               # 工作区 shell 工具，参与权限引擎
+│   ├── WorkspacePrompt.java         # 项目说明文件注入系统提示词
+│   ├── WorkspaceRuntime.java        # 一个工作区一个 HarnessAgent
+│   └── WorkspaceRuntimeRegistry.java
+├── config/
+│   ├── JacksonConfig.java
+│   └── ModelConfig.java             # OpenAI 兼容端点 / DashScope
+├── dto/AgentStream.java             # 推送给前端的帧
+├── session/
+│   ├── AgentChatService.java        # 提交任务、审批恢复、事件轮询
+│   ├── PendingPermission.java
+│   ├── SessionEventProjector.java   # 持久事件 -> 前端帧
+│   ├── SessionMetadata.java
+│   ├── SessionMetadataStore.java    # runId 与工作区绑定，跨进程存活
+│   └── SessionNotFoundException.java
+├── websocket/
+│   ├── ChatProtocol.java
+│   ├── ChatWebSocketHandler.java
+│   ├── HomeRouter.java
+│   └── WebSocketConfig.java
+├── common/ShellParseHelper.java
+├── properties/AgentCodeProperties.java
+└── AgentCodeApplication.java
 ```
 
-## 技术栈
+## 会话模型
 
-- Java 17
-- Spring Boot 3.5.x
-- Spring AI Alibaba 1.1.2.0
-- Spring AI 1.1.2
-- Maven
+一次 `start_session` 创建 `runId`，并把它绑定到请求里的工作区。服务端用 `HarnessAgent.session(RuntimeContext(userId=local, sessionId=runId))` 取得 `AgentSession`：
+
+- `submit(requestId, text)` 持久接收任务，`requestId` 用作幂等键。
+- `respond(requestId, SessionAnswer)` 恢复挂起的审批或外部执行。
+- `interrupt()` / `steer(guidance)` 停止或引导当前运行。
+- `SessionLog.readAfter(seq, limit)` 读取已提交事件；前端断开不会停止执行。
+- `session.start()` 在进程重启后继续派发已接收的任务。
+
+工作区、会话日志和状态存储的生命周期由 `WorkspaceRuntime` 持有。会话日志默认写入工作区的 `.agentscope-runtime/`，会话元数据写入 `${agentcode.session.runtime-dir}/sessions`，Agent 状态写入 `${agentcode.session.runtime-dir}/state`。
+
+## 权限
+
+权限上下文由 `PermissionPolicy` 构造：
+
+- `read_file`、`grep_files`、`glob_files`、`list_files`、`memory_search`、`memory_get`、`session_search`、`todo_write` 直接放行。
+- `write_file`、`edit_file` 命中默认 ASK。
+- `shell` 先由 `ShellPolicy.autoApprovable` 判断；安全命令直接放行，其余落到默认 ASK。
+
+审批决定：
+
+- `APPROVED`：只放行本次调用。
+- `APPROVE_ALL`：把当前命令写入该会话的 `PermissionContextState` 允许规则，后续相同命令不再询问。规则通过 `ReActAgent.replacePermissionContext` 持久化到 AgentState。
+- `EDITED`：用前端提交的新参数替换原调用参数后执行。
+- `REJECTED`：写入拒绝结果，模型继续下一轮推理。
+
+## 配置
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `AGENTCODE_MODEL_PROVIDER` | `openai` | `openai` 或 `dashscope` |
+| `AGENTCODE_MODEL_API_KEY` | 空 | 优先于 provider 专用密钥 |
+| `OPENAI_API_KEY` / `DASHSCOPE_API_KEY` | 空 | provider 密钥 |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI 兼容端点 |
+| `DASHSCOPE_BASE_URL` | `https://dashscope.aliyuncs.com/api/v1` | DashScope 端点 |
+| `AGENTCODE_MODEL_NAME` | `gpt-4o-mini` | 模型名 |
+| `AGENTCODE_MODEL_TEMPERATURE` | `0.7` | 温度 |
+| `AGENTCODE_MODEL_MAX_TOKENS` | `8192` | 最大输出 |
+| `AGENT_MAX_ITERATIONS` | `20` | 单回合推理上限 |
+| `AGENT_MEMORY_ENABLED` | `false` | 是否启用 Harness 长期记忆与后台整理 |
+| `AGENTCODE_RUNTIME_DIR` | `~/.agentcode` | 会话元数据与状态根目录 |
+| `AGENTCODE_POLL_INTERVAL_MILLIS` | `150` | 事件轮询间隔 |
 
 ## 常用命令
 
 ```bash
-mvn clean compile
-mvn test
+mvn clean test
 mvn spring-boot:run
 ```
 
-## 前端入口
+启动后访问 `http://localhost:8080/`。页面通过 `/ws/chat` 建立连接，支持创建会话、多轮对话、工具审批、停止、打断，以及断线后的 `attach` 续读。
 
-### 1. 浏览器 Web UI
+## WebSocket 协议
 
-启动服务后访问：
+客户端消息：
 
-```text
-http://localhost:8080/
-```
+| type | 字段 | 作用 |
+|---|---|---|
+| `start_session` | `goal`、`workspace`、`requestId` | 创建会话并提交首个任务 |
+| `chat` | `runId`、`content`、`requestId` | 追加多轮消息 |
+| `attach` | `runId`、`afterSeq` | 从指定事件序号续读，不重新执行 |
+| `permission_respond` | `runId`、`toolCallId`、`decision`、`arguments`、`feedback` | 回答审批 |
+| `stop` | `runId` | 停止当前运行 |
+| `interrupt` | `runId`、`guidance` | 引导并打断 |
+| `ping` | `requestId` | 心跳 |
 
-页面会通过 `/ws/chat` 建立 WebSocket 连接，支持：
-- 创建会话
-- 流式显示 Agent 事件
-- 多轮对话
-- 工具审批（批准 / 本会话全部批准 / 拒绝）
-- stop / interrupt
+服务端消息：
 
-### 2. 终端多轮对话客户端
+| type | 关键字段 | 作用 |
+|---|---|---|
+| `session_started` | `runId` | 会话创建完成 |
+| `agent_event` | `status`、`content`、`seq` | 流式事件，`seq` 用于重连 |
+| `permission_requested` | `toolCallId`、`toolName`、`arguments`、`description` | 待审批工具调用 |
+| `done` | `runId` | 当前回合结束 |
+| `stopped` / `interrupted` / `error` / `pong` | 对应字段 | 控制结果 |
 
-Java 项目根目录提供 Node 终端客户端（Node 22+，使用内置 WebSocket，无需额外依赖）：
+`agent_event.status` 取值：`TURN_STARTED`、`THINKING_STREAMING`、`THINKING_FINISHED`、`RESPONSE_STREAMING`、`RESPONSE_FINISHED`、`TOOL_STREAMING`、`TOOL_FINISHED`、`PERMISSION_REQUESTED`、`TURN_FINISHED`、`ERROR`。
 
-```bash
-node scripts/terminal-chat.mjs --ws ws://localhost:8080/ws/chat --workspace /tmp --goal "列出当前目录下的文件"
-```
+## 已覆盖的测试
 
-也可以不传 `--goal`，进入交互模式：
+- `ChatWebSocketMultiTurnIntegrationTest`：同一 `runId` 的多轮上下文。
+- `ChatWebSocketToolUseIntegrationTest`：`read_file` 工具调用与事件。
+- `ChatWebSocketPermissionApprovalIntegrationTest`：shell 审批后恢复执行。
+- `ChatWebSocketPermissionDecisionIntegrationTest`：`EDITED` 与 `REJECTED` 分支。
+- `ChatWebSocketApproveAllIntegrationTest`：`APPROVE_ALL` 规则跨回合生效。
+- `ChatWebSocketReconnectIntegrationTest`：断开后用 `attach` 重放持久事件。
 
-```bash
-node scripts/terminal-chat.mjs --ws ws://localhost:8080/ws/chat
-```
+测试使用确定性的 `ScriptedModel`，不访问真实模型服务。
 
-交互模式支持：
-- 输入任意文字作为多轮消息
-- `stop` 停止当前任务
-- `interrupt <guidance>` 引导中断
-- `exit` 退出
+## 当前边界
 
+- 执行环境为宿主本地工作区；Kubernetes 沙箱尚未接入。AgentScope 的 `KubernetesFilesystemSpec` 可以在后续替换 `LocalFilesystemSpec`。
+- 长期记忆默认关闭，避免离线测试与后台整理调用模型。
+- 未接入 Trace/OpenTelemetry。
+- AgentScope 2.1.0-BETA1 仍是预发布版本，升级时先跑完整测试。
 
+## 参考资料
 
-
-
-# 参考资料
-
-- [Spring AI Alibaba Docs](https://www.java2ai.com/docs/quick-start/)
-- [Spring AI Alibaba GitHub](https://github.com/alibaba/spring-ai-alibaba)
-
+- [AgentScope Java](https://github.com/agentscope-ai/agentscope-java)
+- [AgentScope Java 文档](https://java.agentscope.io/)

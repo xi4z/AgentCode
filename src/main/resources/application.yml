@@ -2,63 +2,24 @@ spring:
   application:
     name: ${SPRING_APPLICATION_NAME:agentcode-java}
 
-  profiles:
-    active: ${SPRING_PROFILES_ACTIVE:dev}
-
-  ai:
-    model:
-      # openai / dashscope / anthropic / ollama
-      chat: ${AI_MODEL_PROVIDER:openai}
-
-    openai:
-      api-key: ${OPENAI_API_KEY:}
-      base-url: ${OPENAI_BASE_URL:https://api.openai.com}
-      chat:
-        options:
-          model: ${OPENAI_CHAT_MODEL:gpt-4o-mini}
-          temperature: ${OPENAI_TEMPERATURE:0.7}
-          max-tokens: ${OPENAI_MAX_TOKENS:8192}
-
-    dashscope:
-      api-key: ${DASHSCOPE_API_KEY:}
-      base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/api/v1}
-      chat:
-        options:
-          model: ${DASHSCOPE_CHAT_MODEL:qwen-max}
-          temperature: ${DASHSCOPE_TEMPERATURE:0.7}
-          top-p: ${DASHSCOPE_TOP_P:0.8}
-          max-tokens: ${DASHSCOPE_MAX_TOKENS:8192}
-          stop: ${DASHSCOPE_STOP:}
-    chat:
-      client:
-        observation-enabled: ${AI_OBSERVATION_ENABLED:true}
-    mcp:
-      client:
-        enabled: ${MCP_CLIENT_ENABLED:false}
-
 agentcode:
-  audit:
-    enabled: ${AGENTCODE_AUDIT_ENABLED:true}
   agent:
-    max-steps: ${AGENT_MAX_STEPS:20}
-    system-prompt: ${AGENT_SYSTEM_PROMPT:You are a helpful AI assistant. Use the available tools to complete the user's goal. When the goal is fully achieved, respond with a final answer and do not call any more tools.}
-    global-context-file: ${AGENT_GLOBAL_CONTEXT_FILE:~/.agent/context.md}
-    project-context-file: ${AGENT_PROJECT_CONTEXT_FILE:.agent/context.md}
-
-# 若需要配置 Spring AI 原生 MCP client，可参考：
-# spring:
-#   ai:
-#     mcp:
-#       client:
-#         enabled: ${MCP_CLIENT_ENABLED:false}
-#         name: ${MCP_CLIENT_NAME:agentcode}
-#         version: ${MCP_CLIENT_VERSION:0.0.1}
-#         type: ${MCP_CLIENT_TYPE:SYNC}
-#         stdio:
-#           servers:
-#             - name: ${MCP_STDIO_SERVER_NAME:default}
-#               command: ${MCP_STDIO_SERVER_COMMAND:}
-#               args: ${MCP_STDIO_SERVER_ARGS:}
+    name: ${AGENT_NAME:AgentCode}
+    agent-id: ${AGENT_ID:agentcode}
+    system-prompt: ${AGENT_SYSTEM_PROMPT:You are a coding agent. Use the available tools to complete the user's goal. When the goal is fully achieved, answer without calling more tools.}
+    max-iterations: ${AGENT_MAX_ITERATIONS:20}
+    memory-enabled: ${AGENT_MEMORY_ENABLED:false}
+  model:
+    provider: ${AGENTCODE_MODEL_PROVIDER:openai}
+    api-key: ${AGENTCODE_MODEL_API_KEY:${OPENAI_API_KEY:${DASHSCOPE_API_KEY:}}}
+    base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+    dashscope-base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/api/v1}
+    name: ${AGENTCODE_MODEL_NAME:${OPENAI_CHAT_MODEL:gpt-4o-mini}}
+    temperature: ${AGENTCODE_MODEL_TEMPERATURE:0.7}
+    max-tokens: ${AGENTCODE_MODEL_MAX_TOKENS:8192}
+  session:
+    runtime-dir: ${AGENTCODE_RUNTIME_DIR:${user.home}/.agentcode}
+    poll-interval-millis: ${AGENTCODE_POLL_INTERVAL_MILLIS:150}
 
 management:
   endpoints:
@@ -73,6 +34,6 @@ logging:
   level:
     root: ${LOG_LEVEL:INFO}
     com.agentcode: ${AGENT_LOG_LEVEL:DEBUG}
-    org.springframework.ai: ${SPRING_AI_LOG_LEVEL:INFO}
+    io.agentscope: ${AGENTSCOPE_LOG_LEVEL:INFO}
   file:
     name: ${LOG_FILE:logs/agentcode.log}

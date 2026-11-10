@@ -182,7 +182,15 @@ async function handleMessage(msg) {
 
 function printAgentEvent(status, content) {
     if (status === 'PERMISSION_REQUESTED') return;
-    if (status === 'TOOL_FINISHED') {
+    if (status === 'TURN_STARTED') {
+        finishStreamLine();
+        log('▶ 开始处理');
+    } else if (status === 'TURN_FINISHED') {
+        finishStreamLine();
+    } else if (status === 'ERROR') {
+        finishStreamLine();
+        log('❌ ' + (content || '回合失败'));
+    } else if (status === 'TOOL_FINISHED') {
         finishStreamLine();
         log('  🔧 [工具执行完成]');
     } else if (status === 'TOOL_STREAMING') {

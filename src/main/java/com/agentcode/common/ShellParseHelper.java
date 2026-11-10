@@ -135,14 +135,21 @@ public final class ShellParseHelper {
     }
 
     /**
-     * 将 shell 通配符转成正则表达式
+     * 将 shell 通配符转成正则表达式；其余字符按字面量处理。
      */
     public static Pattern compileShellWildcard(String pattern) {
-        String regex = pattern
-                .replace(".", "\\.")
-                .replace("*", ".*")
-                .replace("?", ".");
-        return Pattern.compile(regex);
+        StringBuilder regex = new StringBuilder();
+        for (int index = 0; index < pattern.length(); index++) {
+            char current = pattern.charAt(index);
+            if (current == '*') {
+                regex.append(".*");
+            } else if (current == '?') {
+                regex.append('.');
+            } else {
+                regex.append(Pattern.quote(String.valueOf(current)));
+            }
+        }
+        return Pattern.compile(regex.toString());
     }
 
     /**
