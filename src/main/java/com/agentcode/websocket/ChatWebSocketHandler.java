@@ -191,6 +191,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
             Sinks.Many<String> outbound) {
         String key = connectionId + ":" + runId;
         AtomicBoolean permissionRequested = new AtomicBoolean(false);
+        AtomicBoolean failed = new AtomicBoolean(false);
         AtomicReference<Disposable> self = new AtomicReference<>();
         Disposable disposable =
                 chatService
@@ -201,6 +202,9 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                                         permissionRequested.set(true);
                                         sendPendingPermissions(outbound, requestId, runId);
                                     } else {
+                                        if (event.status() == AgentStream.Status.ERROR) {
+                                            failed.set(true);
+                                        }
                                         send(
                                                 outbound,
                                                 ServerMessage.agentEvent(
@@ -209,7 +213,7 @@ public class ChatWebSocketHandler implements WebSocketHandler {
                                 })
                         .doOnComplete(
                                 () -> {
-                                    if (!permissionRequested.get()) {
+                                    if (!permissionRequested.get() && !failed.get()) {
                                         send(outbound, ServerMessage.done(runId));
                                     }
                                 })
